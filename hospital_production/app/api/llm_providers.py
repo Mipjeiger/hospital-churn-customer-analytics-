@@ -7,8 +7,12 @@ from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 from api.config import settings
 from openai import OpenAI
+from groq import Groq
+from groq import APIError as GroqAPIError
 from typing import List, Dict, Any
 from sklearn.preprocessing import LabelEncoder
+from huggingface_hub.errors import HfHubHTTPError
+from httpx import HTTPError as HttpxError
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -31,28 +35,32 @@ Capabilities:
 
 class LLMClient:
     """Setup LLM Client for inference using HuggingFace Inference API, Groq API, or NineRouter API based on the environment variables."""
-    def __init__(self, model_name: str = None):
+    def __init__(self, model_name: str | None = None):
         self.model_name = model_name
+
         self.hf_api_key = settings.HUGGINGFACE_API_KEY
         self.groq_api_key = settings.GROQ_API_KEY
         self.ninerouter_base_url = settings.NINEROUTER_BASE_URL
         self.ninerouter_api_key = settings.NINEROUTER_API_KEY
+
+        # Definition LLM APi clients
+        self.hf_client = (
+            InferenceClient(
+                token=self.hf_api_key,
+                base_url="https://router.huggingface.co",
+            )
+            if self.hf_api_key else None
+        )
+        
+        self.groq_client = Groq(api_key=self.groq_api_key) if self.groq_api_key else None
+        self.ninerouter_client = OpenAI(api_key=self.ninerouter_api_key,
+                                        base_url=self.ninerouter_base_url) if self.ninerouter_api_key else None
 
         # Load config json
         self.role_config = settings.ROLE_CONFIG if settings.ROLE_CONFIG.exists() else None
 
         # Load database
         self.data = settings.DATA_PATH if settings.DATA_PATH.exists() else None
-
-        # Configure the API key
-        if self.hf_api_key:
-            self.client = InferenceClient(token=self.hf_api_key) if self.hf_api_key else None
-
-        if self.groq_api_key:
-            self.groq_client = InferenceClient(token=self.groq_api_key) if self.groq_api_key else None
-
-        if self.ninerouter_api_key:
-            self.ninerouter_client = OpenAI(api_key=self.ninerouter_api_key) if self.ninerouter_api_key else None
 
     # --- Load ML Models ---
     def load_models(self):
@@ -99,64 +107,76 @@ class LLMClient:
         }
 
     # ---- LLM Inference ----
-    def llm(self, messages: List[Dict[str, str]], max_tokens: int = 512, temperature=0.3):
+    def llm(self, messages: List[Dict[str, str]], max_tokens: int = 512, temperature=0.3) -> dict[str, str]:
         """LLM Inference using HuggingFace, Groq, or NineRouter API based on the environment variables."""
 
         # Try HuggingFace Inference API
-        if self.hf_client:
-            kwargs = dict(
-                model="Qwen/Qwen2.5-Coder-32B-Instruct",
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
-            response = self.hf_client.chat(**kwargs)
-            msg = response.choices[0].message
-            print(f"🧑‍💻 Using Huggingface")
+        if self.hf_client is not None:
+            try:
+                response = self.hf_client.chat_completion(
+                    model="Qwen/Qwen2.5-Coder-32B-Instruct",
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
 
-            return {
-                "text": msg.content,
-                "role": msg.role,
-                "provider": "HuggingFace"
-            }            
+                message = response.choices[0].message
+
+                logger.info(f"🧑‍💻 Using Huggingface")
+
+                return {
+                    "text": message.content or "",
+                    "role": message.role or "assistant",
+                    "provider": "HuggingFace",
+                }
+
+            except (HfHubHTTPError, HttpxError) as e:
+                logger.warning(f"❌ HuggingFace Inference API error: {e}. Falling back to Groq or NineRouter.")
 
         # Second fallback to Groq Inference API
-        if self.groq_client:
-            kwargs = dict(
-                model="openai/gpt-oss-20b",
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
-            response = self.groq_client.chat(**kwargs)
-            msg = response.choices[0].message
-            print(f"🧑‍💻 Fallback to using Groq")
+        if self.groq_client is not None:
+            try:
+                response = self.groq_client.chat.completions.create(
+                    model="openai/gpt-oss-20b",
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
 
-            return {
-                "text": msg.content,
-                "role": msg.role,
-                "provider": "Groq"
-            }
+                message = response.choices[0].message
+                logger.info(f"🧑‍💻 Fallbacl to Using Groq")
 
-        # Third fallback to NineRouter Inference API
-        if self.ninerouter_client:
-            kwargs = dict(
-                model="sragent",
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
-            response = self.ninerouter_client.chat(**kwargs)
-            msg = response.choices[0].message
-            print(f"🧑‍💻 Fallback to using NineRouter")
+                return {
+                    "text": message.content or "",
+                    "role": message.role or "assistant",
+                    "provider": "Groq",
+                }
 
-            return {
-                "text": msg.content,
-                "role": msg.role,
-                "provider": "NineRouter"
-            }
+            except (GroqAPIError, HttpxError, OSError) as e:
+                logger.warning(f"❌ Groq Inference API error: {e}. Falling back to NineRouter.")
 
-        raise RuntimeError("❌ No LLM provider is configured. Please set the appropriate API keys in the environment variables.")
+        if self.ninerouter_client is not None:
+            try:
+                response = self.ninerouter_client.chat.completions.create(
+                    model="sragent",
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+
+                message = response.choices[0].message
+                logger.info(f"🧑‍💻 Fallback to Using NineRouter")
+
+                return {
+                    "text": message.content or "",
+                    "role": message.role or "assistant",
+                    "provider": "NineRouter",
+                }
+
+            except (HttpxError, OSError) as e:
+                logger.warning(f"❌ NineRouter Inference API error: {e}. No more fallbacks available.")
+
+        raise RuntimeError("❌ No LLM provider is configured. Please set the appropriate environment variables for HuggingFace, Groq, or NineRouter.")
 
     # --- Build Agentic AI ---
     def agentic_ai(self, user_query: str, role: str) -> dict[str, Any]:

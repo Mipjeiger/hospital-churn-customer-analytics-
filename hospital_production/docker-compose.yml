@@ -9,10 +9,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_MULTIPLE_DATABASES: ${POSTGRES_DB}, ${LANGFUSE_DB}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     networks:
       - hospital_network
 
@@ -84,17 +86,18 @@ services:
     networks:
       - hospital_network
 
-  langfuse-db:
-    image: postgres:16
-    container_name: langfuse-db
+  clickhouse:
+    image: clickhouse/clickhouse-server
+    container_name: clickhouse
     environment:
-      POSTGRES_USER: ${LANGFUSE_USER}
-      POSTGRES_PASSWORD: ${LANGFUSE_PASSWORD}
-      POSTGRES_DB: ${LANGFUSE_DB}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
     ports:
-      - "5433:5432"
+      - "8123:8123"
+      - "9003:9000"
     volumes:
-      - langfuse_data:/var/lib/postgresql/data
+      - clickhouse_data:/var/lib/clickhouse
     networks:
       - hospital_network
 
@@ -104,13 +107,19 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://${LANGFUSE_USER}:${LANGFUSE_PASSWORD}@langfuse-db:5432/${LANGFUSE_DB}
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
-      SALT: ${SALT}
+      - DATABASE_URL=postgresql://${LANGFUSE_USER}:${LANGFUSE_PASSWORD}@postgres:5432/${LANGFUSE_DB}
+      - CLICKHOUSE_URL=http://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:8123/${CLICKHOUSE_DB}
+      - CLICKHOUSE_MIGRATION_URL=clickhouse://:${CLICKHOUSE_PASSWORD}@clickhouse:9000/${CLICKHOUSE_DB}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_CLUSTER_ENABLED=false
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - SALT=${SALT}
     ports:
       - "4000:3000"
     depends_on:
-      - langfuse-db
+      - postgres
+      - clickhouse
     networks:
       - hospital_network
 
@@ -120,12 +129,20 @@ services:
     command: prefect server start --host 0.0.0.0
     ports:
       - "4200:4200"
+    environment:
+      - PREFECT_API_DATABASE_TIMEOUT=30
+    volumes:
+      - prefect_data:/root/.prefect
+    networks:
+      - hospital_network
   
 volumes:
   pgdata:
   minio_data:
   mlflow_data:
+  clickhouse_data:
   langfuse_data:
+  prefect_data:
 
 networks:
   hospital_network:

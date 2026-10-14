@@ -2,3 +2,4 @@ develop/.env
 **.DS_Store
 **__pycache__/
 hospital_production/.env
+hospital_production/minio.license

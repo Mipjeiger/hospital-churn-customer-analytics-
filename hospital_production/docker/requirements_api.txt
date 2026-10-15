@@ -13,9 +13,26 @@ scikit-learn==1.5.2
 joblib==1.4.2
 xgboost>=2.1.4
 
+# Mlflow for model tracking
+mlflow>=3.0.0
+mlflow[genai]
+
+# MinIO for object storage
+#minio>=7.0.0
+
+# Prefect for workflow orchestration
+#prefect>=3.3.0
+
+# Langfuse for LLM observability
+#langfuse>=4.0.0
+
+# Feature store
+#feast>=0.50.0
+
 # Redis cache
 #redis>=4.6.0
 
 # LLM & Embedding Libraries
-huggingface-hub==0.26.2
+huggingface-hub>=0.27.0
 groq>=0.9.0
+openai>=2.0.0

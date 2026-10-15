@@ -3,3 +3,5 @@ develop/.env
 **__pycache__/
 hospital_production/.env
 hospital_production/minio.license
+hospital_production/PRODUCTION_RUNBOOK.md
+hospital_production/app/feast/data

@@ -75,8 +75,8 @@ services:
       - .env
     environment:
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
       - MLFLOW_TRACKING_URI=http://mlflow:5000
     volumes:
       - mlflow_data:/mlflow
@@ -109,7 +109,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://${LANGFUSE_USER}:${LANGFUSE_PASSWORD}@postgres:5432/${LANGFUSE_DB}
       - CLICKHOUSE_URL=http://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:8123/${CLICKHOUSE_DB}
-      - CLICKHOUSE_MIGRATION_URL=clickhouse://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:9000/${CLICKHOUSE_DB}
+      - CLICKHOUSE_MIGRATION_URL=clickhouse://:${CLICKHOUSE_PASSWORD}@clickhouse:9000/${CLICKHOUSE_DB}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
       - CLICKHOUSE_CLUSTER_ENABLED=false
@@ -134,6 +134,9 @@ services:
       - "4200:4200"
     environment:
       - PREFECT_API_DATABASE_TIMEOUT=30
+      - PREFECT_SERVER_API_HOST=0.0.0.0
+      - PREFECT_SERVER_ANALYTICS_ENABLED=false
+      - PREFECT_SERVER_UI_API_URL=http://localhost:4200/api
     volumes:
       - prefect_data:/root/.prefect
     networks:

@@ -6,6 +6,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, Grad
 from xgboost import XGBClassifier, XGBRegressor
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from app.ml.preprocess import build_preprocessor
+from sklearn.preprocessing import LabelEncoder
 
 """Multi-model trainer for all 5 concepts ML Models system design."""
 
@@ -28,13 +29,33 @@ REG_ZOO = {
 
 # ---- Metrics ----
 def _clf_metrics(y, p, prob=None):
-    return {
+    out = {
         "accuracy": float(accuracy_score(y, p)),
         "precision": float(precision_score(y, p, average="weighted", zero_division=0)),
         "recall": float(recall_score(y, p, average="weighted", zero_division=0)),
         "f1": float(f1_score(y, p, average="weighted", zero_division=0)),
-        "roc_auc": float(roc_auc_score(y, prob)) if prob is not None else None
+        "roc_auc": None
     }
+
+    if prob is None:
+        return out
+
+    y_arr = np.asarray(y)
+    n_classes = len(np.unique(y_arr))
+
+    try:
+        if n_classes == 2:
+            # binary - use probability of the positive class
+            p_pos = prob[:, 1] if prob.ndim > 1 else prob
+            out["roc_auc"] = float(roc_auc_score(y_arr, p_pos))
+        elif n_classes > 2:
+            # multiclass - pass full (n, k) probability matrix
+            out["roc_auc"] = float(roc_auc_score(y_arr, prob, multi_class="ovr", average="weighted"))
+
+    except ValueError:
+        out["roc_auc"] = None
+
+    return out
 
 def _reg_metrics(y, p):
     return {
@@ -55,19 +76,37 @@ def train_multimodel(X_train, y_train, X_test, y_test, task="classification", zo
     # Append the preprocessor to the model pipeline
     results = {}
     for name, factory in zoo.items():
-        pipe = Pipeline([("pre", build_preprocessor(X_train)), ("est", factory())])
-        pipe.fit(X_train, y_train) 
-        p = pipe.predict(X_test)
-
         if task == "classification":
-            prob = pipe.predict_proba(X_test)[:, 1] if hasattr(pipe, "predict_proba") else None
-            metrics = _clf_metrics(y_test, p, prob)
+            # Encode string labels -> integers (XGBoost requires)
+            le = LabelEncoder()
+            y_train_enc = le.fit_transform(y_train)
+            y_test_enc = le.transform(y_test)
+
+            pipe = Pipeline([
+                ("pre", build_preprocessor(X_train)),
+                ("est", factory())
+            ])
+            pipe.fit(X_train, y_train_enc)
+            p = pipe.predict(X_test)
+
+            prob = pipe.predict_proba(X_test) if hasattr(pipe, "predict_proba") else None
+            metrics = _clf_metrics(y_test_enc, p, prob)
+            results[name] = {"pipeline": pipe, "metrics": metrics, "label_encoder": le}
+
         else:
+            # Train without label encoding for regression
+            pipe = Pipeline([
+                ("pre", build_preprocessor(X_train)),
+                ("est", factory())
+            ])
+            pipe.fit(X_train, y_train)
+            p = pipe.predict(X_test)
             metrics = _reg_metrics(y_test, p)
-        results[name] = {"pipeline": pipe, "metrics": metrics}
+            results[name] = {"pipeline": pipe, "metrics": metrics}
 
     return results
 
 def pick_best(results, task):
+    """Key metric: 'roc_auc' for classification, 'r2' for regression. Returns the best model's name and its results."""
     key = "roc_auc" if task == "classification" else "r2"
-    return max(results.items(), key=lambda x: x[1]["metrics"][key])
+    return max((r for r in results.items() if r[1]["metrics"].get(key) is not None), key=lambda x: x[1]["metrics"][key])

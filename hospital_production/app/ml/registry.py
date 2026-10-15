@@ -70,4 +70,4 @@ def log_and_register(concept: str, results: dict, task: str, features: list):
 
 def load_concept(concept: str):
     """FastAPI loads the bundle from MinIO (fast, single pickle)."""
-    return load_artifact(f"models/{concept}_bundle")
+    return load_artifact(f"{concept}_bundle")

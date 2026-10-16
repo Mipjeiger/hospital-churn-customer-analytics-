@@ -14,7 +14,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - hospital_network
 
@@ -33,11 +33,13 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
-      REDIS_URL: ${REDIS_URL}
+      FEAST_REPO_PATH: /app/app/feast
     ports:
       - "8000:8000"
     volumes:
       - .:/app
+      - .:/app/feast:/app/app/feast
+      - .:/app/feast/data:/app/app/feast/data
     depends_on:
       - postgres
     networks:
@@ -142,6 +144,38 @@ services:
     networks:
       - hospital_network
   
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./app/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - hospital_network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./app/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./app/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - hospital_network
+
 volumes:
   pgdata:
   minio_data:
@@ -149,6 +183,8 @@ volumes:
   clickhouse_data:
   langfuse_data:
   prefect_data:
+  prometheus_data:
+  grafana_data:
 
 networks:
   hospital_network:

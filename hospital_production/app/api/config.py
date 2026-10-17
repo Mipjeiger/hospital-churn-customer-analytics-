@@ -4,9 +4,25 @@ from dotenv import load_dotenv
 
 DIR_PATH = Path(__file__).parents[2]
 ENV_PATH = DIR_PATH / ".env"
-load_dotenv(ENV_PATH, override=True)
+load_dotenv(ENV_PATH)
 
 class Settings():
+
+    # PostgreSQL
+    POSTGRES_USER: str = os.getenv("POSTGRES_USER")
+    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD")
+    POSTGRES_DB: str = os.getenv("POSTGRES_DB")
+    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST")
+    POSTGRES_PORT: str = os.getenv("POSTGRES_PORT")
+    POSTGRES_SCHEMA: str = os.getenv("POSTGRES_SCHEMA")
+    POSTGRES_TABLE: str = os.getenv("POSTGRES_TABLE")
+
+    # Data source selector
+    DATA_SOURCE: str = os.getenv("DATA_SOURCE")
+
+    # Inference cache
+    CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "300"))
+    CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "10000"))
 
     # LLM API Keys
     HUGGINGFACE_API_KEY: str = os.getenv("HUGGINGFACE_API_KEY")
@@ -48,5 +64,6 @@ class Settings():
     LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
     LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
     LANGFUSE_HOST       = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+    LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "http://localhost:4000")
 
 settings = Settings()

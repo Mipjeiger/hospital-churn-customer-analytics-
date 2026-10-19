@@ -10,14 +10,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
+        git \
     && pip install --no-cache-dir --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY docker/requirements_api.txt /tmp/requirements_api.txt
 
 RUN pip install --no-cache-dir -r /tmp/requirements_api.txt \
-    && apt-get purge -y --auto-remove build-essential \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache
+    && rm -rf /tmp/* /root/.cache
 
 COPY app /app/app
 

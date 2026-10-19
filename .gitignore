@@ -7,5 +7,5 @@ hospital_production/PRODUCTION_RUNBOOK.md
 hospital_production/app/feast/data
 secrets/
 *.json
+**/feature_store.yaml
 hospital_production/app/feast/feature_store.yaml
-**feature_store.yaml

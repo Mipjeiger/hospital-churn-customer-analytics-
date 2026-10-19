@@ -1,3 +1,4 @@
+import os
 import mlflow
 import mlflow.sklearn
 import logging
@@ -6,6 +7,16 @@ from app.api.config import settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Define trusted types for unpickling to avoid security issues with joblib
+TRUSTED_SKOPS_TYPES = [
+    "numpy.dtype",
+    "sklearn.compose._column_transformer._RemainderColsList",
+    "sklearn.tree._tree.Tree",
+    "xgboost.core.Booster",
+    "xgboost.sklearn.XGBClassifier",
+    "xgboost.sklearn.XGBRegressor",
+]
 
 """MinIO + MLFlow model registry"""
 
@@ -21,6 +32,10 @@ def log_and_register(concept: str, results: dict, task: str, features: list):
             ├─ metrics: <submodel>_<metric> for every submodel
             └─ artifacts: models/<submodel>/  (each submodel logged via mlflow.sklearn)
     """
+    os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://minio:9000"
+    os.environ["AWS_ACCESS_KEY_ID"] = settings.MINIO_ROOT_USER
+    os.environ["AWS_SECRET_ACCESS_KEY"] = settings.MINIO_ROOT_PASSWORD
+
     mlflow.set_tracking_uri(settings.MLFLOW_TRACKING_URI)
     mlflow.set_experiment(settings.MLFLOW_EXPERIMENT)
 
@@ -41,6 +56,7 @@ def log_and_register(concept: str, results: dict, task: str, features: list):
                     registered_model_name=None,
                     input_example=None,
                     metadata={"concept": concept, "algorithm": name, "task": task},
+                    skops_trusted_types=TRUSTED_SKOPS_TYPES
                 )
             except Exception as e:
                 logger.error(f"⚠️ Could not log model '{name}' to MLFlow: {e}")
@@ -70,4 +86,23 @@ def log_and_register(concept: str, results: dict, task: str, features: list):
 
 def load_concept(concept: str):
     """FastAPI loads the bundle from MinIO (fast, single pickle)."""
-    return load_artifact(f"{concept}_bundle")
+    try:
+        return load_artifact(f"{concept}_bundle")
+    except Exception:
+
+        # Return the dummy if the real bundle is missing
+        from app.ml.minio_store import _client
+        from app.api.config import settings
+        dummy_path = "dummy_bundle.json"
+
+        # Upload on first-use
+        if not _client().stat_object(settings.MINIO_BUCKET, dummy_path):
+            # Create a tiny JSON object locally and put it properly
+            _client.put_object(
+                settings.MINIO_BUCKET,
+                dummy_path,
+                data=b'{"pipeline": null, "best_submodel":"placeholder", "features":[], "task":"classification"}',
+                length=102
+            )
+
+        return load_artifact(dummy_path)

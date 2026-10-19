@@ -110,13 +110,10 @@ def train_integrity(feats: pd.DataFrame):
         (feats["length_of_stay"] < 0)
     ).astype(int)
 
-    # Use only columns that exist in the DataFrame
     available_features = [col for col in FEATURE_NAMES if col in feats.columns]
     X_train, X_test, y_train, y_test = split(feats[available_features], feats["integrity_flagged"])
     res = train(X_train, y_train, X_test, y_test, task_type="classification")
-    res = train(feats[available_features], feats["integrity_flagged"], task_type="classification")
     log_and_register("integrity_audit", res, task="classification", features=available_features)
-
 
 @task(name="train-service-performance")
 def train_service_performance(feats: pd.DataFrame):
@@ -165,7 +162,7 @@ def train_churn(feats: pd.DataFrame):
     res = train(X_train, y_train, X_test, y_test, task_type="classification")
     log_and_register("patient_churn", res, task="classification", features=features)
 
-from app.flows._metrics import TRAIN_RUN, PREDICT_RUN, LLM_EVAL_RUN
+from app.flows._metrics import TRAIN_RUN
 
 # ═══════════ Flow entrypoint ═══════════
 @flow(name="hospital-training-flow", log_prints=True)

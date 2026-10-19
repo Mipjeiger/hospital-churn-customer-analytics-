@@ -12,7 +12,7 @@ class Settings():
     POSTGRES_USER: str = os.getenv("POSTGRES_USER")
     POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD")
     POSTGRES_DB: str = os.getenv("POSTGRES_DB")
-    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST")
+    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "postgres")
     POSTGRES_PORT: str = os.getenv("POSTGRES_PORT")
     POSTGRES_SCHEMA: str = os.getenv("POSTGRES_SCHEMA")
     POSTGRES_TABLE: str = os.getenv("POSTGRES_TABLE")
@@ -48,7 +48,7 @@ class Settings():
     ROLE_CONFIG: Path = DATABASE_PATH / "llm_artifacts" / "role_config.json"
 
     # ── Storage ──
-    MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT", "localhost:9000")
+    MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT", "minio:9000")
     MINIO_ROOT_USER = os.getenv("MINIO_ROOT_USER")
     MINIO_ROOT_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD")
     MINIO_BUCKET     = os.getenv("MINIO_BUCKET")

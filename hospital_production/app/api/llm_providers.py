@@ -13,6 +13,7 @@ from typing import List, Dict, Any
 from sklearn.preprocessing import LabelEncoder
 from huggingface_hub.errors import HfHubHTTPError
 from httpx import HTTPError as HttpxError
+from app.ml.pg_store import load_data
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -60,7 +61,18 @@ class LLMClient:
         self.role_config = settings.ROLE_CONFIG if settings.ROLE_CONFIG.exists() else None
 
         # Load database
-        self.data = settings.DATA_PATH if settings.DATA_PATH.exists() else None
+        if settings.DATA_SOURCE == "postgres":
+            try:
+                self.data = load_data()
+                logger.info(f"✅ Loaded {len(self.data):,} rows from PostgreSQL database.")
+            except Exception as e:
+                logger.error(f"❌ Error loading data from PostgreSQL: {e}")
+
+                # Safe fallback to Parquet file if PostgreSQL is not configured
+                self.data = pd.read_parquet(settings.DATA_PATH) if settings.DATA_PATH.exists() else pd.DataFrame()
+
+        else:
+            self.data = pd.read_parquet(settings.DATA_PATH) if settings.DATA_PATH.exists() else None
 
     # --- Load ML Models ---
     def load_models(self):

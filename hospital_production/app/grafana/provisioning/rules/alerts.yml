@@ -16,3 +16,11 @@ groups:
           severity: warning
         annotations:
           summary: "Model {{ $labels.model_name }} is not loaded"
+
+      - alert: ModelAccuracyDrop
+        expr: business_kpi{kpi_name="model_accuracy"} < 0.70
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model accuracy dropped below 70%"

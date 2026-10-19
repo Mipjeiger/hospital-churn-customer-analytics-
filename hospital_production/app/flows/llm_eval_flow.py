@@ -1,6 +1,7 @@
 from prefect import flow, task
 from app.llm.prompts import register_all_prompts
 from app.llm.eval import run_eval
+from app.flows._metrics import LLM_EVAL_RUN
 
 """Prefect eval pipeline"""
 
@@ -22,6 +23,7 @@ def t_eval_ninerouter():
 
 @flow(name="llm-observability-flow", log_prints=True)
 def llm_eval_flow():
+    LLM_EVAL_RUN.inc()  # increment Prometheus counter
     t_register()
     t_eval_hf()
     t_eval_groq()

@@ -6,6 +6,7 @@ from app.api.config import settings
 from app.ml.preprocess import feature_engineer
 from app.ml.registry import load_concept
 from sklearn.preprocessing import LabelEncoder
+from app.flows._metrics import PREDICT_RUN
 
 # Define logger
 logging.basicConfig(level=logging.INFO)
@@ -71,6 +72,7 @@ def predict(df, concept, features):
 
 @flow(name="hospital-predict-flow", log_prints=True)
 def predict_flow():
+    PREDICT_RUN.inc()  # increment Prometheus counter
     df = load_and_prepare()
     churn = predict(df, "patient_churn", 
                     ["age","satisfaction","length_of_stay","available_beds",

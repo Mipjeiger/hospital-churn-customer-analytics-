@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 class LLMMessages(BaseModel):
     role: Literal["system", "user", "assistant"] = Field(..., description="Role of the message sender.")
     content: str
+    #role: Literal["executive", "clinical", "ops", "risk"] = Field(..., description="Role context for the message.")
 
 class LLMRequest(BaseModel):
     messages: List[LLMMessages] = Field(..., description="List of messages for LLM inference.")
@@ -22,3 +23,22 @@ class LLMResponse(BaseModel):
     text: str
     role: str
     provider: str
+
+class LLMAgent(BaseModel):
+    question: str
+    role: Literal["executive", "clinical", "ops", "risk"] = Field(..., description="Role context for the message.")
+    history: List[dict] | None = None
+
+class LLMAgentResponse(BaseModel):
+    answer: str
+    role: str
+
+class ChurnRequest(BaseModel):
+    patient_id: str = Field(..., pattern=r"^PAT-\w{8}$")
+
+class ChurnResponse(BaseModel):
+    patient_id: str
+    churn_probability: float
+    churn_prediction: int
+    best_submodel: str
+    cached: bool

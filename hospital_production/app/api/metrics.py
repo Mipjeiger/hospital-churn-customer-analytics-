@@ -11,6 +11,7 @@ Label contract
     LLM_FALLBACKS -> from_provider, to_provider
     RISK_SCORE -> patient_id, service
     MODEL_LOADED -> model_name
+    BUSINESS_KPI -> 
 """
 
 # HTTP Layers metrics
@@ -56,4 +57,10 @@ MODEL_LOADED = Gauge(
     "model_loaded",
     "Indicates whether the ML model is loaded and ready for predictions",
     ["model_name"]
+)
+
+BUSINESS_KPI = Gauge(
+    "business_kpi",
+    "Business KPI derived from ML/LLM",
+    ["kpi_name"],
 )

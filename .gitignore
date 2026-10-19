@@ -8,3 +8,4 @@ hospital_production/app/feast/data
 secrets/
 *.json
 hospital_production/app/feast/feature_store.yaml
+**feature_store.yaml

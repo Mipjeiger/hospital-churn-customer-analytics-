@@ -1,0 +1,18 @@
+groups:
+  - name: ml_flow_alerts
+    rules:
+      - alert: PrefectFlowFailure
+        expr: increase(prefect_train_runs_total[5m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prefect train flow has not run in the last 5 min"
+
+      - alert: ModelNotLoaded
+        expr: model_loaded == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model {{ $labels.model_name }} is not loaded"

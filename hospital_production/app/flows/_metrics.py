@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 # on a previous import) we catch the OSError and simply continue –
 # the existing exporter will keep serving metrics.
 # ---------------------------------------------------------------
-METRICS_PORT = int(os.getenv("METRICS_PORT", "8001"))
+METRICS_PORT = int(os.getenv("PROMETHEUS_EXPORTER_PORT", 8001))
 
 try:
     if not getattr(start_http_server, "_started", False):

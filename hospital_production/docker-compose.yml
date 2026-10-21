@@ -20,8 +20,12 @@ services:
 
   fastapi:
     build:
+      args:
+        DNS1: 8.8.8.8
+        DNS2: 1.1.1.1
       context: .
       dockerfile: docker/Dockerfile.api
+    container_name: fastapi
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -32,23 +36,32 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      HUGGINGFACE_API_KEY: ${HUGGINGFACE_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      NINEROUTER_API_KEY: ${NINEROUTER_API_KEY}
       FEAST_REPO_PATH: /app/app/feast
       MINIO_ENDPOINT: minio:9000
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      PROMETHEUS_EXPORTER_PORT: 8003
+      # Updated port to avoid conflict with other services (e.g., Prometheus itself)
+      PROMETHEUS_EXPORTER_PORT: 8004
       ENABLE_PROMETHEUS_EXPORTER: "true"
       PREFECT_API_URL: http://prefect:4200/api
     ports:
       - "8000:8000" # Expose FastAPI endpoint
       - "8002:8002"  # Expose Prefect metrics endpoint
-
     volumes:
       - .:/app
       - .:/app/feast:/app/app/feast
       - .:/app/feast/data:/app/app/feast/data
+    extra_hosts:
+      - "api.groq.com:104.18.38.236"
+      - "api.groq.com:172.64.149.20"
+      - "api.huggingface.co:144.22.46.135"
+      - "api.ninerouter.com:34.120.100.85"
+      - "host.docker.internal:host-gateway"
     depends_on:
       - postgres
     networks:
@@ -91,6 +104,8 @@ services:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
     volumes:
       - mlflow_data:/mlflow
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - postgres
       - minio
@@ -131,6 +146,8 @@ services:
       - SALT=${SALT}
     ports:
       - "4000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - postgres
       - clickhouse

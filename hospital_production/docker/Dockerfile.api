@@ -1,7 +1,4 @@
 FROM python:3.11-slim
-ARG DNS1
-ARG DNS2
-RUN echo "nameserver ${DNS1}" > /etc/resolv.conf && echo "nameserver ${DNS2}" >> /etc/resolv.conf
 
 WORKDIR /app
 
@@ -9,10 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/app
 
-COPY docker/resolv.conf /etc/resolv.conf
-RUN echo "deb http://151.101.122.133/debian trixie main contrib non-free
-deb http://151.101.122.133/debian trixie-updates main contrib non-free
-deb http://151.101.122.133/debian-security trixie-security main contrib non-free" > /etc/apt/sources.list && apt-get update && apt-get install -y --no-install-recommends     build-essential     curl     git && pip install --no-cache-dir --upgrade pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \

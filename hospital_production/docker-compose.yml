@@ -20,9 +20,6 @@ services:
 
   fastapi:
     build:
-      args:
-        DNS1: 8.8.8.8
-        DNS2: 1.1.1.1
       context: .
       dockerfile: docker/Dockerfile.api
     container_name: fastapi
@@ -57,10 +54,6 @@ services:
       - .:/app/feast:/app/app/feast
       - .:/app/feast/data:/app/app/feast/data
     extra_hosts:
-      - "api.groq.com:104.18.38.236"
-      - "api.groq.com:172.64.149.20"
-      - "api.huggingface.co:144.22.46.135"
-      - "api.ninerouter.com:34.120.100.85"
       - "host.docker.internal:host-gateway"
     depends_on:
       - postgres

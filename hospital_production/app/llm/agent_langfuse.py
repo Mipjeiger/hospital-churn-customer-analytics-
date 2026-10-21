@@ -1,4 +1,7 @@
-import os
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parents[2] / ".env")
+
 import json
 from langfuse import Langfuse, observe, get_client
 from huggingface_hub import InferenceClient
@@ -14,17 +17,60 @@ hf = InferenceClient(token=settings.HUGGINGFACE_API_KEY) if settings.HUGGINGFACE
 groq = Groq(api_key=settings.GROQ_API_KEY) if settings.GROQ_API_KEY else None
 ninerouter = OpenAI(api_key=settings.NINEROUTER_API_KEY, base_url=settings.NINEROUTER_BASE_URL) if settings.NINEROUTER_API_KEY else None
 
+# Add function to normalize tool calls
+def _coerce_content(c):
+    if c is None:
+        return None
+    if isinstance(c, str):
+        return c
+    if hasattr(c, "to_csv"):
+        return c.to_csv(index=False)
+    if hasattr(c, "to_dict"):
+        return json.dumps(c.to_dict(), default=str)
+    return json.dumps(c, default=str)
+
+# Define allowed keys for messages
+_ALLOWED_MESSAGE_KEYS = {"role", "content", "name", "tool_calls", "tool_call_id"}
+
+def _normalize_messages(messages):
+    clean = []
+    for m in messages:
+        m = dict(m)
+        role = m.get("role")
+        content = _coerce_content(m.get("content"))
+
+        # Non-assistant messages must have string content
+        if role != "assistant" and content is None:
+            content = ""
+
+        m["content"] = content
+        m = {k: v for k, v in m.items() if k in _ALLOWED_MESSAGE_KEYS}
+        clean.append(m)
+    return clean
+
+def _call(client, model, messages, tools, max_tokens, temperature):
+    kwargs = dict(
+        model=model,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    return client.chat.completions.create(**kwargs)
+
 # Observe langfuse endpoint LLM agent
 @observe(name="llm-router")
 def llm_router(messages, tools=None, temperature=0.3, max_tokens=512):
     """Langfuse traced LLM agent for multiple LLM providers"""
+    messages = _normalize_messages(messages)
+    langfuse = get_client()
+
     providers = [
-        ("huggingface", hf, "Qwen/Qwen2.5-Coder-32B-Instruct", lambda client, model: client.chat.completions.create(
-            model=model, messages=messages, max_tokens=max_tokens, temperature=temperature, tools=tools)),
-        ("groq", groq, "openai/gpt-oss-20b", lambda client, model: client.chat.completions.create(
-            model=model, messages=messages, max_tokens=max_tokens, temperature=temperature, tools=tools)),
-        ("ninerouter", ninerouter, "sragent", lambda client, model: client.chat.completions.create(
-            model=model, messages=messages, max_tokens=max_tokens, temperature=temperature, tools=tools)),
+        ("huggingface", hf, "Qwen/Qwen2.5-Coder-32B-Instruct", _call),
+        ("groq", groq, "openai/gpt-oss-20b", _call),
+        ("ninerouter", ninerouter, "sragent", _call),
     ]
 
     for provider_name, client_obj, model_name, call_fn in providers:
@@ -32,15 +78,19 @@ def llm_router(messages, tools=None, temperature=0.3, max_tokens=512):
             continue
 
         try:
-            r = call_fn(client_obj, model_name)
+            r = call_fn(client_obj, model_name, messages, tools, max_tokens, temperature)
             message = r.choices[0].message
             content = message.content or ""
 
             # Update observation using get_client() SDK method
-            get_client().update_observation(
-                model=model_name,
-                provider={"provider": provider_name},
-                output=content
+            langfuse.update_current_span(
+                level="DEFAULT",
+                status_message=f"{provider_name} responded",
+                output=content,
+                metadata={
+                    "model": model_name,
+                    "provider": provider_name,
+                },
             )
 
             return {
@@ -50,7 +100,12 @@ def llm_router(messages, tools=None, temperature=0.3, max_tokens=512):
             }
 
         except Exception as e:
-            print(f"⚠️ {provider_name} failed: {e}")
+            err_str = str(e)
+            print(f"⚠️ {provider_name} failed: {type(e).__name__}: {err_str}")
+            langfuse.update_current_span(
+                level="ERROR",
+                status_message=f"{provider_name} failed: {err_str[:200]}",
+            )
             
     raise RuntimeError("All LLM providers failed")
 
@@ -74,7 +129,7 @@ def run_agent(user_message, tools_schema, tool_map, history=None, max_steps=5):
 
     if history:
         messages += history
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": str(user_message)})
 
     for _ in range(max_steps):
         r = llm_router(messages, tools=tools_schema)

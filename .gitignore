@@ -9,3 +9,4 @@ secrets/
 *.json
 **/feature_store.yaml
 hospital_production/app/feast/feature_store.yaml
+hospital_production/docker/resolv.conf

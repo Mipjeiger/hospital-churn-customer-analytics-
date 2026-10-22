@@ -1,4 +1,4 @@
-from prometheus_client import Counter, Histogram, Gauge
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 """Prometheus metrics for the Hospital Operations API.
 

@@ -6,6 +6,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pathlib
 from datetime import date
+from functools import lru_cache
+from sqlalchemy import create_engine, text
+from app.api.config import settings
 
 # ──────────────────────────────────────────────
 # Page config
@@ -77,17 +80,34 @@ def resolve_parquet_path():
         return p
     return candidates[0]
 
+@st.cache_resource
+def get_database_engine():
+    return create_engine(
+        (
+        f"postgresql+psycopg2://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}",
+        ),
+        pool_pre_ping=True,
+    )
+
 @st.cache_data(show_spinner="Loading hospital dataset...")
 def load_data():
-    path = resolve_parquet_path()
-    df = pd.read_parquet(path)
+    schema = settings.POSTGRES_SCHEMA
+    table = settings.POSTGRES_TABLE
+
+    query = text(f"""SELECT * FROM {schema}.{table}""")
+
+    with get_database_engine().connect() as conn:
+        df = pd.read_sql(query, conn)
+
     # Normalize column names: staff_absens typo -> staff_absent (keep both)
     if "staff_absens" in df.columns and "staff_absent" not in df.columns:
         df["staff_absent"] = df["staff_absens"]
+
     # Ensure datetime
     for c in ["arrival_date","departure_date"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
+    
     # Derive date features
     if "arrival_date" in df.columns:
         df["arrival_year"] = df["arrival_date"].dt.year
@@ -101,32 +121,12 @@ def load_data():
     # Age groups
     df["age_group"] = pd.cut(df["age"], bins=[-1,12,18,30,45,60,120],
                              labels=["0–12","13–18","19–30","31–45","46–60","61+"], include_lowest=True)
-    # Satisfaction bins
-    df["satisfaction_bin"] = pd.cut(df["satisfaction"], bins=[-1,20,40,60,80,100],
-                                    labels=["0–20","21–40","41–60","61–80","81–100"], include_lowest=True)
-    # Capacity pressure
+    df["satisfaction_bin"] = pd.cut(df["satisfaction"], bins=[-1,20,40,60,80,100],                                    labels=["0–20","21–40","41–60","61–80","81–100"], include_lowest=True)
     df["capacity_pressure"] = df["patients_request"] / (df["available_beds"] + 1)
-    def _cat_cp(v):
-        if v < 1: return "Low"
-        elif v < 2: return "Moderate"
-        elif v < 4: return "High"
-        else: return "Critical"
-    df["capacity_pressure_level"] = df["capacity_pressure"].apply(_cat_cp)
-    # Risk score (heuristic, 0-100)
-    # Normalize components
-    los_min, los_max = df["length_of_stay"].min(), df["length_of_stay"].max()
-    los_range = max(los_max - los_min, 1)
-    df["_dissat"] = (100 - df["satisfaction"]) / 100
-    df["_los_risk"] = (df["length_of_stay"] - los_min) / los_range
-    df["_refusal_pressure"] = (df["patients_refused"] / df["patients_request"].replace(0, np.nan)).fillna(0).clip(0,1)
-    df["_morale_risk"] = (100 - df["staff_morale"]) / 100
-    df["risk_score"] = (0.40*df["_dissat"] + 0.25*df["_los_risk"] + 0.20*df["_refusal_pressure"] + 0.15*df["_morale_risk"]) * 100
-    df["risk_level"] = pd.cut(df["risk_score"], bins=[-1,30,60,100], labels=["Low","Medium","High"])
-    # Staff attendance rate per row
-    df["staff_attendance_rate"] = df["staff_present"] / df["total_staff"].replace(0, np.nan)
-    # Admission/refusal rates per row
-    df["admission_rate_row"] = df["patients_admitted"] / df["patients_request"].replace(0, np.nan)
-    df["refusal_rate_row"] = df["patients_refused"] / df["patients_request"].replace(0, np.nan)
+    df["staff_attendance_rate"] = (df["staff_present"] / df["total_staff"].replace(0, np.nan).fillna(0.0))
+    df["admission_rate_row"] = (df["patients_admitted"] / df["patients_request"].replace(0, np.nan).fillna(0.0))
+    df["refusal_rate_row"] = (df["patients_refused"] / df["patients_request"].replace(0, np.nan).fillna(0.0))
+
     return df
 
 try:

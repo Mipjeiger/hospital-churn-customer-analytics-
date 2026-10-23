@@ -4,19 +4,23 @@ from prometheus_client import Counter, start_http_server
 
 log = logging.getLogger(__name__)
 
-METRICS_PORT = int(os.getenv("PROMETHEUS_EXPORTER_PORT", 8001))
+METRICS_PORT = int(os.getenv("PROMETHEUS_EXPORTER_PORT", "8001"))
 
-if os.getenv("ENABLE_PROMETHEUS_EXPORTER", "false").lower() == "true":
-    global _exporter_started
-    if globals().get('_exporter_started'):
-        log.info("Prometheus exporter already started; skipping")
-    else:
-        try:
-            start_http_server(METRICS_PORT)
-            _exporter_started = True
-            log.info("Prometheus exporter started on port %s", METRICS_PORT)
-        except OSError as exc:
-            log.warning("Could not start Prometheus exporter: %s", exc)
+def start_prometheus() -> None:
+    if os.getenv("ENABLE_PROMETHEUS_EXPORTER", "false").lower() != "true":
+        return
+    
+    try:
+        start_http_server(METRICS_PORT)
+        log.info(f"Prometheus exporter started on port {METRICS_PORT}")
+    except OSError as exc:
+        if exc.errno == 98:  # Address already in use
+            log.warning(f"Prometheus exporter port {METRICS_PORT} is already in use; skipping start")
+        else:
+            log.error(f"Failed to start Prometheus exporter on port {METRICS_PORT}: {exc}")
+            raise
+
+start_prometheus()
 
 # ---------------------------------------------------------------
 # Counters for Prefect flow executions (default registry)

@@ -3,12 +3,23 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import io
+import json as _json
 from plotly.subplots import make_subplots
 import pathlib
-from datetime import date
-from functools import lru_cache
+import sys
+from pathlib import Path
 from sqlalchemy import create_engine, text
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+STREAMLIT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path[:] = [path for path in sys.path if Path(path or ".").resolve() != STREAMLIT_DIR]
+
 from app.api.config import settings
+from app.streamlit.metrics import start_metrics_server, update_dashboard_metrics
+from app.ml.registry import load_concept
+from app.ml.minio_store import _client
 
 # ──────────────────────────────────────────────
 # Page config
@@ -19,6 +30,13 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+@st.cache_resource
+def initialize_metrics_server() -> None:
+    start_metrics_server()
+
+initialize_metrics_server()
 
 # ──────────────────────────────────────────────
 # Styles
@@ -84,7 +102,12 @@ def resolve_parquet_path():
 def get_database_engine():
     return create_engine(
         (
-        f"postgresql+psycopg2://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}",
+            "postgresql+psycopg2://"
+            f"{settings.POSTGRES_USER}:"
+            f"{settings.POSTGRES_PASSWORD}@"
+            f"{settings.POSTGRES_HOST}:"
+            f"{settings.POSTGRES_PORT}/"
+            f"{settings.POSTGRES_DB}"
         ),
         pool_pre_ping=True,
     )
@@ -108,7 +131,9 @@ def load_data():
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
     
-    # Derive date features
+    # ========================================
+    # Add new features to enchance analysis and insights
+    # =======================================
     if "arrival_date" in df.columns:
         df["arrival_year"] = df["arrival_date"].dt.year
         df["arrival_month"] = df["arrival_date"].dt.month
@@ -121,19 +146,111 @@ def load_data():
     # Age groups
     df["age_group"] = pd.cut(df["age"], bins=[-1,12,18,30,45,60,120],
                              labels=["0–12","13–18","19–30","31–45","46–60","61+"], include_lowest=True)
-    df["satisfaction_bin"] = pd.cut(df["satisfaction"], bins=[-1,20,40,60,80,100],                                    labels=["0–20","21–40","41–60","61–80","81–100"], include_lowest=True)
+    df["satisfaction_bin"] = pd.cut(df["satisfaction"], bins=[-1,20,40,60,80,100],
+                                    labels=["0–20","21–40","41–60","61–80","81–100"], include_lowest=True)
+    
     df["capacity_pressure"] = df["patients_request"] / (df["available_beds"] + 1)
     df["staff_attendance_rate"] = (df["staff_present"] / df["total_staff"].replace(0, np.nan).fillna(0.0))
     df["admission_rate_row"] = (df["patients_admitted"] / df["patients_request"].replace(0, np.nan).fillna(0.0))
     df["refusal_rate_row"] = (df["patients_refused"] / df["patients_request"].replace(0, np.nan).fillna(0.0))
+    df["capacity_pressure_level"] = pd.cut(df["capacity_pressure"], 
+                                           bins=[-1,1,2,3,1000], labels=["Low", "Moderate", "High", "Very High"], include_lowest=True)
+    df["risk_score"] = (
+            (df["patients_request"] <= df["patients_request"].mean()).astype(float)
+            + (df["patients_refused"] >= df["patients_refused"].mean()).astype(float)
+            + (df["patients_admitted"] <= df["patients_admitted"].mean()).astype(float)
+            + (df["satisfaction"] <= df["satisfaction"].mean()).astype(float)
+    ) / 4.0
+    df["risk_level"] = pd.cut(df["risk_score"], 
+                              bins=[-1, 0.25, 0.5, 0.75, 1], labels=["Low", "Medium", "High", "Critical"], include_lowest=True)
 
     return df
 
+# ──────────────────────────────────────────────
+# Model bundles + manifest from MinIO
+# ──────────────────────────────────────────────
+@st.cache_resource
+def load_bundle_cached(concept: str):
+    """Load a trained bundle once per Streamlit session."""
+    return load_concept(concept)
+
+@st.cache_data
+def load_manifest_cached(concept: str) -> dict:
+    """Load a manifest JSON from MinIO (metrics, submodels, features.)"""
+    c = _client()
+    r = c.get_object(settings.MINIO_BUCKET, f"manifest/{concept}.json")
+    try:
+        return _json.loads(r.read().decode())
+    finally:
+        r.close()
+        r.release_conn()
+
+@st.cache_data(show_spinner=False)
+def predict_with_bundle(concept: str, submodel: str, df_hash: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Run the best submodel of a concept bundle against df.
+    'df_hash' as a cache key the frame iteself is passed for content."""
+    bundle = load_bundle_cached(concept)
+    models = bundle["models"]
+
+    if submodel not in models:
+        raise ValueError(f"Submodel '{submodel}' not found in bundle for concept '{concept}'. Available: {list(models.keys())}")
+
+    entry = models[submodel]
+    pipe = entry["pipeline"]
+    features = bundle["features"]
+
+    missing = [f for f in features if f not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required features for {concept}: {missing}")
+
+    # Split into X and predict
+    X = df[features]
+    preds = pipe.predict(X)
+
+    # Label encoding
+    le = entry.get("label_encoder")
+    if le is not None:
+        try:
+            preds = le.inverse_transform(preds)
+        except Exception:
+            pass # Keep raw preds if inverse fails
+
+    out = df[["patient_id"]].copy()
+    out[f"{concept}_pred"] = preds
+    out[f"{concept}_submodel"] = submodel
+
+    # Get attribution predictions if available
+    if hasattr(pipe, "predict_proba"):
+        proba = pipe.predict_proba(X)
+
+        if proba.ndim == 2 and proba.shape[1] == 2:
+            out[f"{concept}_prob"] = proba[:, 1]
+
+        elif proba.ndim == 2 and proba.shape[1] > 2:
+            for i in range(proba.shape[1]):
+                out[f"{concept}_prob_class_{i}"] = proba[:, i]
+
+    return out
+
+# Load dataframe by the function
 try:
     df_raw = load_data()
 except Exception as e:
     st.error(f"Failed to load dataset: {e}")
     st.stop()
+
+# Attach model predictions to the raw frame for every page can use it
+MODEL_CONCEPTS = [
+    "patient_churn",
+    "risk_score",
+    "risk_level",
+    "service_performance",
+    "integrity_audit",
+    "staff_staff_morale",
+    "staff_staff_attendance_rate",
+]
+
+model_errors = {}
 
 # ──────────────────────────────────────────────
 # Helpers — safe metrics
@@ -179,6 +296,13 @@ def render_insight(text, kind="info"):
     elif kind=="bad": cls += " insight-bad"
     st.markdown(f'<div class="{cls}">{text}</div>', unsafe_allow_html=True)
 
+def model_badge(concept: str):
+    """Small text showing which submodel produced the columns for a concept."""
+    col = f"{concept}_submodel"
+    if col in df.columns and df[col].notna().any():
+        used = df[col].dropna().unique()
+        st.caption(f"🧠 Using: **{concept}** → {', '.join(map(str, used))}")
+
 def fmt_pct(x): return f"{x*100:.1f}%" if pd.notna(x) else "—"
 def fmt_num(x): return f"{x:,.0f}" if pd.notna(x) else "—"
 def fmt_float(x, d=1): return f"{x:.{d}f}" if pd.notna(x) else "—"
@@ -192,11 +316,15 @@ with st.sidebar:
 
     nav = st.radio(
         "Navigation",
-        ["🏥 Overview","👥 Patient Analytics","🧑‍⚕️ Patient Management","📉 Churn Analytics","🛏️ Hospital Operations","👨‍⚕️ Staff Analytics","📊 Service Performance","⚠️ Operational Risk","💡 Management Insights","🔎 Data Explorer"],
+        ["🏥 Overview","👥 Patient Analytics","🧑‍⚕️ Patient Management",
+        "📉 Churn Analytics","🛏️ Hospital Operations","👨‍⚕️ Staff Analytics",
+        "📊 Service Performance","⚠️ Operational Risk","🧠 Model Performance",   
+        "💡 Management Insights","🔎 Data Explorer"],
         label_visibility="collapsed"
     )
     st.markdown("---")
     st.markdown("### Filters")
+
     # Date range
     min_d = df_raw["arrival_date"].min().date()
     max_d = df_raw["arrival_date"].max().date()
@@ -205,28 +333,116 @@ with st.sidebar:
         start_d, end_d = d_range
     else:
         start_d, end_d = min_d, max_d
+
     # Service
     all_services = sorted(df_raw["service"].dropna().unique().tolist())
     sel_services = st.multiselect("Service", all_services, default=all_services)
+    
     # Age
     age_min, age_max = int(df_raw["age"].min()), int(df_raw["age"].max())
     age_range = st.slider("Age range", age_min, age_max, (age_min, age_max))
+
     # Churn
     churn_opt = st.selectbox("Patient churn", ["All","Churned","Retained"])
     st.markdown("---")
     st.caption("This dashboard is intended for operational and analytical purposes. It does not provide clinical diagnosis or medical advice.")
 
+    # --- Add models panel on the sidebar ---
+    st.markdown("---")
+    st.markdown("### 🧠 Models")
+
+    try:
+        concepts_available = [c for c in MODEL_CONCEPTS if c not in model_errors]
+        if concepts_available:
+            st.caption(f"{len(concepts_available)}/{len(MODEL_CONCEPTS)} models loaded successfully.")
+            st.markdown(
+            "".join(f'<div style="font-size:0.78rem;color:#8AB4B5;">✅ {c}</div>'
+                    for c in concepts_available),
+            unsafe_allow_html=True
+        )
+
+        if model_errors:
+            with st.expander(f"⚠️ {len(model_errors)} failed", expanded=False):
+                for c, e in model_errors.items():
+                    st.caption(f"**{c}** — {e[:120]}")
+
+    except Exception as e:
+        st.warning(f"❌ Model panel error: {e}")
+
+    # --- Submodel selector ---
+    st.markdown("### 🎛️ Model Selection")
+
+    # Per-concept model choice (defaults to best metric)
+    model_choice: dict[str, str] = {}
+    model_manifests: dict[str, dict] = {}
+
+    for concept in MODEL_CONCEPTS:
+        if concept in model_errors:
+            continue # Skip concepts with errors
+
+        try:
+            m = load_manifest_cached(concept)
+            model_manifests[concept] = m
+        except Exception:
+            continue # Skip manifest load errors
+
+        task = m["task"]
+        metric_key = "roc_auc" if task=="classification" else "r2"
+
+        submodels = m["submodels"]
+        metrics = m["metrics"]
+        best_by_metric = max(submodels, key=lambda s: metrics.get(s, {}).get(metric_key, -1) or -1)
+
+        # Human-readable label with primary metric
+        options = []
+        label_to_name = {}
+        for s in submodels:
+            val = metrics.get(s, {}).get(metric_key)
+            pretty = f"{s} ({metric_key}={val:.3f})" if val is not None else s
+            options.append(pretty)
+            label_to_name[pretty] = s
+
+        # Default label is the best by metric
+        default_label = next(lbl for lbl, n in label_to_name.items() if n == best_by_metric)
+        with st.expander(concept, expanded=False):
+            pick = st.selectbox(
+                "submodel",
+                options,
+                index=options.index(default_label),
+                key=f"submodel_{concept}",
+                label_visibility="collapsed"
+            )
+            model_choice[concept] = label_to_name[pick]
+
+    # --- Compute predictions with user-selected submodels ---
+    pred_frames = {}
+    for concept, submodel in model_choice.items():
+        if concept in model_errors:
+            continue
+
+        try:
+            h = f"{concept}_{submodel}_{len(df_raw)}"
+            pred_frames[concept] = predict_with_bundle(concept, submodel, h, df_raw)
+
+        except Exception as e:
+            model_errors[concept] = str(e)
+
+    # Attach to df_raw in every pages
+    for concept, pf in pred_frames.items():
+        df_raw = df_raw.merge(pf, on="patient_id", how="left")
+
 # ──────────────────────────────────────────────
 # Apply global filters
 # ──────────────────────────────────────────────
 df = df_raw.copy()
-# date
 mask = (df["arrival_date"].dt.date >= start_d) & (df["arrival_date"].dt.date <= end_d)
+
 df = df[mask]
 if sel_services:
     df = df[df["service"].isin(sel_services)]
 else:
     df = df.iloc[0:0]
+
 df = df[(df["age"] >= age_range[0]) & (df["age"] <= age_range[1])]
 if churn_opt == "Churned":
     df = df[df["patient_churn"]==1]
@@ -234,6 +450,12 @@ elif churn_opt == "Retained":
     df = df[df["patient_churn"]==0]
 
 empty = len(df)==0
+
+update_dashboard_metrics(
+    row_count=len(df),
+    churn_rate=float(df["patient_churn"].mean()) if not empty else 0.0,
+    average_satisfaction=float(df["satisfaction"].mean()) if not empty else 0.0,
+)
 
 def empty_guard():
     if empty:
@@ -253,6 +475,7 @@ staff_att = calculate_staff_attendance_rate(df) if not empty else 0
 if nav == "🏥 Overview":
     st.markdown("# Hospital Care Analytics")
     st.markdown('<div class="section-desc">Monitor patient experience, hospital capacity, staff performance, and patient churn — filtered data updates every panel.</div>', unsafe_allow_html=True)
+
     # KPI row 1
     c1,c2,c3,c4,c5 = st.columns(5)
     with c1: render_kpi("Total Patients", fmt_num(len(df)), f"of {len(df_raw):,} total")
@@ -266,6 +489,23 @@ if nav == "🏥 Overview":
     with c8: render_kpi("Available Beds (avg)", fmt_float(df["available_beds"].mean(),1) if not empty else "—", "per day")
     with c9: render_kpi("Staff Attendance", fmt_pct(staff_att) if not empty else "—", f"{fmt_num(df['staff_present'].sum())} / {fmt_num(df['total_staff'].sum())}")
     with c10: render_kpi("Capacity Pressure (avg)", fmt_float(df["capacity_pressure"].mean(),2) if not empty else "—", df["capacity_pressure_level"].mode().iloc[0] if not empty and len(df["capacity_pressure_level"].mode())>0 else "")
+
+    # Model derived KPI
+    if "patient_churn_prob" in df.columns:
+        c11, c12 = st.columns(2)
+        with c11:
+            render_kpi(
+                "Predicted Churn (avg)",
+                f"{df['patient_churn_prob'].mean():.1%}",
+                f"using {df['patient_churn_submodel'].dropna().iloc[0] if df['patient_churn_submodel'].notna().any() else '—'}",
+            )
+        with c12:
+            pred_pos = (df["patient_churn_prob"] > 0.5).sum()
+            render_kpi(
+                "Predicted Churned (≥0.5)",
+                fmt_num(pred_pos),
+                f"vs {fmt_num(df['patient_churn'].sum())} observed",
+            )
 
     if not empty_guard():
         # Row: Patient Volume Over Time + Churn Trend
@@ -421,6 +661,43 @@ elif nav == "👥 Patient Analytics":
             fig = px.pie(svc, names="service", values="patients", hole=0.55, color="service", color_discrete_map=SERVICE_COLORS)
             fig.update_layout(height=300)
             st.plotly_chart(fig, use_container_width=True)
+
+        # Churn insights by selected submodel of the patient is churned
+        if "patient_churn_prob" in df.columns:
+            render_section_header("Model Churn vs Observed",
+                                "Predicted probability from the selected submodel, compared to observed churn")
+            model_badge("patient_churn")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = px.histogram(df, x="patient_churn_prob", nbins=40,
+                                color_discrete_sequence=["#0E7C7B"])
+                fig.update_layout(height=300, xaxis_title="Predicted churn probability",
+                                yaxis_title="Patients")
+                st.plotly_chart(fig, use_container_width=True)
+
+            with c2:
+                cm = pd.crosstab(
+                    df["patient_churn"].map({0: "Actual Retained", 1: "Actual Churned"}),
+                    (df["patient_churn_prob"] > 0.5).map({False: "Pred Retained", True: "Pred Churned"}),
+                )
+                fig = px.imshow(cm.values, text_auto=True, aspect="auto",
+                                x=cm.columns.tolist(), y=cm.index.tolist(),
+                                color_continuous_scale="Blues")
+                fig.update_layout(height=300, xaxis_title="", yaxis_title="",
+                                title=dict(text="Confusion matrix (threshold=0.5)",
+                                            font=dict(size=12)))
+                st.plotly_chart(fig, use_container_width=True)
+
+            # ROC-ish summary from the manifest
+            m = model_manifests.get("patient_churn")
+            if m:
+                used = df["patient_churn_submodel"].dropna().iloc[0]
+                met = m["metrics"].get(used, {})
+                st.caption(f"Submodel **{used}** — accuracy {met.get('accuracy', 0):.3f}, "
+                        f"F1 {met.get('f1', 0):.3f}, ROC-AUC {met.get('roc_auc', 0):.3f} "
+                        f"(from manifest)")
+
         # Insights
         render_section_header("Key Insights")
         ag2 = df.groupby("age_group", observed=True)["patient_churn"].mean()
@@ -463,6 +740,7 @@ elif nav == "🧑‍⚕️ Patient Management":
         with c7:
             f_age = st.slider("Age (table)", int(df["age"].min()), int(df["age"].max()), (int(df["age"].min()), int(df["age"].max())))
 
+        # tdf = filtered df for table display
         tdf = df.copy()
         if q:
             ql = q.lower()
@@ -475,34 +753,67 @@ elif nav == "🧑‍⚕️ Patient Management":
             tdf = tdf[tdf["patient_churn"]==0]
         if f_risk != "All":
             tdf = tdf[tdf["risk_level"]==f_risk]
+        
         tdf = tdf[(tdf["satisfaction"]>=f_sat[0]) & (tdf["satisfaction"]<=f_sat[1])]
         tdf = tdf[(tdf["length_of_stay"]>=f_los[0]) & (tdf["length_of_stay"]<=f_los[1])]
         tdf = tdf[(tdf["age"]>=f_age[0]) & (tdf["age"]<=f_age[1])]
         tdf = tdf.sort_values("risk_score", ascending=False)
 
         st.markdown(f"**{len(tdf):,} patients** match the table filters (sorted by risk score).")
-        show_cols = ["patient_id","name","age","service","arrival_date","departure_date","length_of_stay","satisfaction","patient_churn","risk_score","risk_level","capacity_pressure_level"]
+
+        # Add base columns and base labels for helper features
+        base_cols = [
+            "patient_id","name","age","service","arrival_date","departure_date",
+            "length_of_stay","satisfaction","patient_churn",
+            "risk_score","risk_level",
+            "capacity_pressure_level",
+        ]
+        base_labels = [
+            "Patient ID","Name","Age","Service","Arrival","Departure",
+            "LOS","Satisfaction","Churn",
+            "Risk Score (heuristic)","Risk Level (heuristic)",
+            "Capacity",
+        ]
+
+        # Optional model columns
+        optional = [
+            ("risk_level_pred",   "Risk Level (model)"),
+            ("patient_churn_prob","Churn Prob (model)"),
+        ]
+
+        show_cols = [c for c in base_cols if c in tdf.columns]
+        labels = [base_labels[i] for i, c in enumerate(base_cols) if c in tdf.columns]
+
+        for col, label in optional:
+            if col in tdf.columns:
+                show_cols.append(col)
+                labels.append(label)
+
         pretty = tdf[show_cols].copy()
-        pretty.columns = ["Patient ID","Name","Age","Service","Arrival","Departure","LOS","Satisfaction","Churn","Risk Score","Risk Level","Capacity"]
+        pretty.columns = labels
         pretty["Churn"] = pretty["Churn"].map({0:"Retained",1:"Churned"})
-        pretty["Risk Score"] = pretty["Risk Score"].round(1)
-        # styled table
+        pretty["Risk Score (heuristic)"] = pretty["Risk Score (heuristic)"].round(1)
         st.dataframe(pretty, use_container_width=True, height=420, hide_index=True)
+        model_badge("risk_level")
+        model_badge("patient_churn")
 
         csv = pretty.to_csv(index=False).encode("utf-8")
         st.download_button("Download filtered patients (CSV)", csv, file_name="filtered_patients.csv", mime="text/csv")
 
         render_section_header("Patients Requiring Attention", "Churned or High-risk patients, sorted by risk score")
-        attention = tdf[(tdf["patient_churn"]==1) | (tdf["risk_level"]=="High")].head(20)
-        if len(attention)>0:
-            att_cols = ["patient_id","name","age","service","satisfaction","length_of_stay","patient_churn","risk_score","risk_level"]
-            att = attention[att_cols].copy()
-            att.columns = ["Patient ID","Name","Age","Service","Satisfaction","LOS","Churn","Risk Score","Risk Level"]
-            att["Churn"] = att["Churn"].map({0:"Retained",1:"Churned"})
-            att["Risk Score"] = att["Risk Score"].round(1)
-            st.dataframe(att, use_container_width=True, hide_index=True)
-        else:
-            st.info("No high-risk or churned patients in the current selection.")
+        attention = (
+            tdf[(tdf["patient_churn"]==1) | (tdf["risk_level_pred"].astype(str).str.lower()=="high")]
+            .sort_values("patient_churn_prob", ascending=False)
+            .head(20)
+        )
+        att_cols = ["patient_id","name","age","service","satisfaction","length_of_stay",
+                    "patient_churn","patient_churn_prob","risk_level_pred"]
+        att = attention[att_cols].copy()
+        att.columns = ["Patient ID","Name","Age","Service","Satisfaction","LOS",
+                    "Observed Churn","Predicted Churn Prob","Predicted Risk"]
+        att["Observed Churn"] = att["Observed Churn"].map({0:"Retained",1:"Churned"})
+        att["Predicted Churn Prob"] = att["Predicted Churn Prob"].round(3)
+        st.dataframe(att, use_container_width=True, hide_index=True)
 
         # Insights
         render_section_header("Key Insights")
@@ -657,7 +968,8 @@ elif nav == "🛏️ Hospital Operations":
     with c4: render_kpi("Admission Rate", fmt_pct(admission_rate) if not empty else "—")
     with c5: render_kpi("Refusal Rate", fmt_pct(refusal_rate) if not empty else "—")
     with c6: render_kpi("Avg Available Beds", fmt_float(df["available_beds"].mean(),1) if not empty else "—")
-    if not empty_guard():
+    
+    if not empty_guard():    
         # Monthly requests vs admissions
         render_section_header("Requests vs Admissions — Monthly")
         mon = df.groupby(df["arrival_date"].dt.to_period("M")).agg(requests=("patients_request","sum"), admitted=("patients_admitted","sum"), refused=("patients_refused","sum")).reset_index()
@@ -668,6 +980,7 @@ elif nav == "🛏️ Hospital Operations":
         fig.add_bar(x=mon["arrival_date"], y=mon["refused"], name="Refused", marker_color="#D64545")
         fig.update_layout(barmode="group", height=320, xaxis_title="", yaxis_title="Patients", legend=dict(orientation="h", y=1.02))
         st.plotly_chart(fig, use_container_width=True)
+        
         c1,c2 = st.columns(2)
         with c1:
             render_section_header("Admission Rate by Service")
@@ -689,6 +1002,7 @@ elif nav == "🛏️ Hospital Operations":
             fig.update_traces(textposition="outside")
             fig.update_layout(height=300, showlegend=False, yaxis_tickformat=".0%", xaxis_title="", yaxis_title="Refusal rate")
             st.plotly_chart(fig, use_container_width=True)
+        
         c1,c2 = st.columns(2)
         with c1:
             render_section_header("Available Beds Over Time")
@@ -708,6 +1022,7 @@ elif nav == "🛏️ Hospital Operations":
             fig.add_trace(go.Scatter(x=dc["arrival_date"], y=dc["adm"], name="Admitted (avg)", mode="lines+markers", line=dict(color="#2A9D8F", dash="dash")))
             fig.update_layout(height=300, xaxis_title="", yaxis_title="Patients / Beds")
             st.plotly_chart(fig, use_container_width=True)
+        
         # Capacity pressure distribution
         render_section_header("Capacity Pressure Distribution", "capacity_pressure = patients_request / (available_beds + 1) — Low <1, Moderate 1–2, High 2–4, Critical >4")
         cpd = df["capacity_pressure_level"].value_counts().reindex(["Low","Moderate","High","Critical"]).reset_index()
@@ -725,6 +1040,7 @@ elif nav == "🛏️ Hospital Operations":
             render_insight(f"Refusal rate is {refusal_rate:.1%} — moderate capacity strain.", kind="warn")
         else:
             render_insight(f"Refusal rate is {refusal_rate:.1%} — capacity is generally meeting demand.")
+        
         # service with highest refusal
         svc_ref = df.groupby("service").agg(req=("patients_request","sum"), ref=("patients_refused","sum"))
         svc_ref["rate"] = svc_ref["ref"]/svc_ref["req"]
@@ -732,18 +1048,34 @@ elif nav == "🛏️ Hospital Operations":
         if svc_ref.loc[worst,"rate"] > refusal_rate + 0.05:
             render_insight(f"<b>{worst}</b> has the highest refusal rate ({svc_ref.loc[worst,'rate']:.1%}) — investigate service-specific bottlenecks.")
 
+        # Model informed service risk
+        if "risk_score_pred" in df.columns:
+            render_section_header("Predicted Risk Score by Service",
+                                "Average predicted risk_score from the selected submodel")
+            rs = df.groupby("service")["risk_score_pred"].mean().reset_index().sort_values("risk_score_pred", ascending=False)
+            fig = px.bar(rs, x="service", y="risk_score_pred", color="service",
+                        color_discrete_map=SERVICE_COLORS,
+                        text=rs["risk_score_pred"].apply(lambda x: f"{x:.2f}"))
+            fig.update_traces(textposition="outside")
+            fig.update_layout(height=300, showlegend=False,
+                            xaxis_title="", yaxis_title="Avg predicted risk score")
+            st.plotly_chart(fig, use_container_width=True)
+            model_badge("risk_score")
+
 # ──────────────────────────────────────────────
 # Page: Staff Analytics
 # ──────────────────────────────────────────────
 elif nav == "👨‍⚕️ Staff Analytics":
     st.markdown("# Staff Analytics")
     st.markdown('<div class="section-desc">Staffing levels, morale, attendance and associations with patient outcomes. Correlation indicates association and does not establish causation.</div>', unsafe_allow_html=True)
+    
     c1,c2,c3,c4,c5 = st.columns(5)
     with c1: render_kpi("Total Staff (sum)", fmt_num(df["total_staff"].sum()) if not empty else "—", "across all records")
     with c2: render_kpi("Staff Present", fmt_num(df["staff_present"].sum()) if not empty else "—")
     with c3: render_kpi("Staff Absent", fmt_num(df["staff_absent"].sum()) if not empty else "—")
     with c4: render_kpi("Attendance Rate", fmt_pct(staff_att) if not empty else "—")
     with c5: render_kpi("Avg Staff Morale", fmt_float(df["staff_morale"].mean(),1) if not empty else "—", "/ 100")
+    
     if not empty_guard():
         c1,c2 = st.columns(2)
         with c1:
@@ -760,6 +1092,7 @@ elif nav == "👨‍⚕️ Staff Analytics":
             fig = px.histogram(df, x="staff_absent", nbins=30, color_discrete_sequence=["#D64545"])
             fig.update_layout(height=300, xaxis_title="Staff absent", yaxis_title="Records")
             st.plotly_chart(fig, use_container_width=True)
+        
         c1,c2 = st.columns(2)
         with c1:
             render_section_header("Staff Morale Trend (monthly avg)")
@@ -778,6 +1111,7 @@ elif nav == "👨‍⚕️ Staff Analytics":
             st.plotly_chart(fig, use_container_width=True)
             st.caption("Correlation indicates association and does not establish causation.")
         render_section_header("Staff Absence vs Patient Churn")
+
         # bin absence into levels
         df["_abs_bin"] = pd.cut(df["staff_absent"], bins=[-1,2,8,20,100], labels=["0–2","3–8","9–20","21+"])
         ab = df.groupby("_abs_bin", observed=True).agg(patients=("patient_id","count"), churn_rate=("patient_churn","mean")).reset_index()
@@ -808,6 +1142,24 @@ elif nav == "👨‍⚕️ Staff Analytics":
         else:
             render_insight("No strong association between staff absence and churn in the current filter.")
 
+        # Predicted staff metrics
+        if "staff_staff_morale_pred" in df.columns:
+            render_section_header("Predicted vs Observed Staff Morale",
+                                "From the selected submodel of staff_staff_morale")
+            mo = df.groupby(df["arrival_date"].dt.to_period("M")).agg(
+                observed=("staff_morale", "mean"),
+                predicted=("staff_staff_morale_pred", "mean"),
+            ).reset_index()
+            mo["arrival_date"] = mo["arrival_date"].astype(str)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=mo["arrival_date"], y=mo["observed"], name="Observed",
+                                    mode="lines+markers", line=dict(color="#0F2A44")))
+            fig.add_trace(go.Scatter(x=mo["arrival_date"], y=mo["predicted"], name="Predicted",
+                                    mode="lines+markers", line=dict(color="#D64545", dash="dash")))
+            fig.update_layout(height=300, xaxis_title="", yaxis_title="Morale")
+            st.plotly_chart(fig, use_container_width=True)
+            model_badge("staff_staff_morale")
+
 # ──────────────────────────────────────────────
 # Page: Service Performance
 # ──────────────────────────────────────────────
@@ -831,14 +1183,17 @@ elif nav == "📊 Service Performance":
         tbl["admission_rate"] = tbl["admitted"]/tbl["requests"]
         tbl["refusal_rate"] = tbl["refused"]/tbl["requests"]
         tbl["attendance"] = tbl["avg_present"]/tbl["avg_total"]
+        
         # Proper capacity pressure avg per service
         cp_svc = df.groupby("service")["capacity_pressure"].mean().reset_index().rename(columns={"capacity_pressure":"avg_cp"})
         tbl = tbl.merge(cp_svc, on="service", how="left")
+        
         # Health score: 35% satisfaction (norm 0-100), 25% low churn (1-churn), 20% admission, 20% attendance — all 0-1 scaled then 0-100
         tbl["health_score"] = (0.35*(tbl["avg_satisfaction"]/100) + 0.25*(1-tbl["churn_rate"]) + 0.20*tbl["admission_rate"].fillna(0) + 0.20*tbl["attendance"].fillna(0))*100
 
         tbl_show = tbl[["service","patients","churn_rate","avg_satisfaction","avg_los","requests","admitted","refused","admission_rate","refusal_rate","avg_beds","avg_morale","attendance","avg_cp","health_score"]].copy()
         tbl_show.columns=["Service","Patients","Churn Rate","Avg Satisfaction","Avg LOS","Requests","Admitted","Refused","Admission Rate","Refusal Rate","Avg Beds","Staff Morale","Attendance","Avg Capacity Pressure","Health Score"]
+        
         # Format
         st.dataframe(
             tbl_show.style.format({
@@ -871,6 +1226,7 @@ elif nav == "📊 Service Performance":
             with col:
                 render_kpi(title, f"{svc}", fmt.format(val) if isinstance(val,float) else str(val))
         rank_card(r1,"Highest Churn", tbl.set_index(tbl.index)["churn_rate"], "{:.1%}", ascending=False)
+        
         # lowest satisfaction
         low_sat_idx = tbl["avg_satisfaction"].idxmin()
         with r2: render_kpi("Lowest Satisfaction", tbl.loc[low_sat_idx,"service"], f"{tbl.loc[low_sat_idx,'avg_satisfaction']:.1f}")
@@ -893,10 +1249,27 @@ elif nav == "📊 Service Performance":
         best = tbl.loc[tbl["health_score"].idxmax(),"service"]
         worst = tbl.loc[tbl["health_score"].idxmin(),"service"]
         render_insight(f"<b>{best}</b> leads on the composite Health Score; <b>{worst}</b> trails — prioritise the drivers (churn, satisfaction, refusals, attendance) for the lowest-ranked service.")
+        
         # churn gap
         churn_gap = tbl["churn_rate"].max() - tbl["churn_rate"].min()
         if churn_gap >= 0.05:
             render_insight(f"Churn varies {churn_gap:.1%} across services — service-level intervention is warranted.")
+
+        # Models predicted service performance
+        if "service_performance_pred" in df.columns:
+            svc_health = df.groupby("service")["service_performance_pred"].mean().reset_index()
+            svc_health = svc_health.rename(columns={"service_performance_pred": "model_health"})
+            svc_health = svc_health.sort_values("model_health", ascending=False)
+            render_section_header("Model-Predicted Service Health",
+                                "Average predicted service_performance from the selected submodel")
+            fig = px.bar(svc_health, x="service", y="model_health", color="service",
+                        color_discrete_map=SERVICE_COLORS,
+                        text=svc_health["model_health"].apply(lambda x: f"{x:.2f}"))
+            fig.update_traces(textposition="outside")
+            fig.update_layout(height=300, showlegend=False,
+                            xaxis_title="", yaxis_title="Predicted health")
+            st.plotly_chart(fig, use_container_width=True)
+            model_badge("service_performance")
 
 # ──────────────────────────────────────────────
 # Page: Operational Risk
@@ -982,6 +1355,7 @@ elif nav == "💡 Management Insights":
     if empty_guard():
         st.stop()
     insights=[]
+
     # 1. Churn vs satisfaction
     if df["patient_churn"].nunique()>1:
         s_c = df[df["patient_churn"]==1]["satisfaction"].mean()
@@ -1001,6 +1375,7 @@ elif nav == "💡 Management Insights":
         insights.append(("Capacity & Access", f"Capacity pressure is moderate ({avg_cp:.2f}). Monitor peak days; no systemic overload in this window."))
     else:
         insights.append(("Capacity & Access", "Capacity is sufficient on average — pressure is low."))
+    
     # 3. Service outlier
     svc_churn = df.groupby("service")["patient_churn"].mean()
     if len(svc_churn)>1:
@@ -1009,6 +1384,7 @@ elif nav == "💡 Management Insights":
             insights.append(("Service Variation", f"Churn ranges from {svc_churn.min():.1%} to {svc_churn.max():.1%} across services (gap {gap:.1%}). <b>{svc_churn.idxmax()}</b> is the outlier to prioritise."))
         else:
             insights.append(("Service Variation", "Churn is consistent across services in the current filter (gap < 5 pp)."))
+    
     # 4. Staff morale
     morale = df["staff_morale"].mean()
     corr_ms = df["staff_morale"].corr(df["satisfaction"])
@@ -1018,18 +1394,22 @@ elif nav == "💡 Management Insights":
         insights.append(("Workforce", f"Staff morale averages {morale:.1f}/100 — moderate. Track trend alongside attendance."))
     else:
         insights.append(("Workforce", f"Staff morale is healthy at {morale:.1f}/100."))
+    
     # 5. Attendance
     if staff_att < 0.7:
         insights.append(("Attendance", f"Staff attendance is {staff_att:.1%} — below 70%. Absenteeism may amplify capacity strain."))
+    
     # 6. Refusal
     if refusal_rate > 0.35:
         insights.append(("Patient Flow", f"Refusal rate is {refusal_rate:.1%} — more than one in three requests are refused. Triage and capacity allocation need review."))
+    
     # 7. LOS
     if df["patient_churn"].nunique()>1:
         los_c = df[df["patient_churn"]==1]["length_of_stay"].mean()
         los_r = df[df["patient_churn"]==0]["length_of_stay"].mean()
         if pd.notna(los_c) and pd.notna(los_r) and abs(los_c - los_r) >= 0.7:
             insights.append(("Length of Stay", f"LOS gap: churned {los_c:.1f} d vs retained {los_r:.1f} d. Examine early discharges and prolonged stays separately."))
+    
     # 8. Risk concentration
     hr = safe_div((df["risk_level"]=="High").sum(), len(df))
     if hr > 0.15:
@@ -1042,6 +1422,17 @@ elif nav == "💡 Management Insights":
             st.markdown(f"**{title}**")
             render_insight(body)
             st.markdown("")
+
+    # Model-informed patient churn
+    if "patient_churn_prob" in df.columns:
+        high_risk_pool = df[df["patient_churn_prob"] > 0.7]
+        if len(high_risk_pool) > 0:
+            insights.append((
+                "Model Signal",
+                f"{len(high_risk_pool)} patients ({len(high_risk_pool)/len(df):.1%}) have predicted "
+                f"churn probability > 0.7 using the **{df['patient_churn_submodel'].dropna().iloc[0]}** "
+                f"submodel. Prioritise these for outreach — predicted, not confirmed.",
+            ))
 
     # Summary table
     st.markdown("### At-a-Glance — Filtered KPIs")
@@ -1056,7 +1447,7 @@ elif nav == "💡 Management Insights":
         "Staff Attendance": f"{staff_att:.1%}",
         "Staff Morale": f"{df['staff_morale'].mean():.1f}",
         "Avg Risk Score": f"{df['risk_score'].mean():.1f}",
-        "Avg Capacity Pressure": f"{df['capacity_pressure'].mean():.2f}",
+        "Avg Capacity Pressure": f"{df['capacity_pressure'].mean():.2f}"
     }])
     st.dataframe(kpi_df, use_container_width=True, hide_index=True)
 
@@ -1066,6 +1457,7 @@ elif nav == "💡 Management Insights":
 elif nav == "🔎 Data Explorer":
     st.markdown("# Data Explorer")
     st.markdown('<div class="section-desc">Data quality, schema and preview. Download respects current global filters.</div>', unsafe_allow_html=True)
+    
     # Quality KPIs
     c1,c2,c3,c4,c5,c6 = st.columns(6)
     with c1: render_kpi("Rows (filtered)", fmt_num(len(df)), f"raw {len(df_raw):,}")
@@ -1085,6 +1477,7 @@ elif nav == "🔎 Data Explorer":
         issues.append(f"Duplicate patient_id: {df_raw.duplicated(subset=['patient_id']).sum()} records.")
     if (df_raw["patients_refused"] > df_raw["patients_request"]).sum() > 0:
         issues.append(f"Operational inconsistency: patients_refused > patients_request in {(df_raw['patients_refused'] > df_raw['patients_request']).sum():,} records (raw).")
+    
     # staff_present + staff_absent vs total
     mismatch = ((df_raw["staff_present"]+df_raw["staff_absent"]).round() != df_raw["total_staff"]).sum()
     if mismatch>0:
@@ -1099,6 +1492,7 @@ elif nav == "🔎 Data Explorer":
         issues.append("Missing values detected — see table below.")
     else:
         issues.append("No missing values — dataset is complete.")
+    
     # LOS vs date diff already validated as consistent
     for iss in issues:
         if "inconsistency" in iss or "exceeds" in iss or "Invalid" in iss or "Duplicate" in iss:
@@ -1107,7 +1501,7 @@ elif nav == "🔎 Data Explorer":
             render_insight(iss)
     st.caption("Records are not modified. Warnings are surfaced for analytical awareness.")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Dataset Preview","Data Types","Missing Values","Descriptive Statistics"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dataset Preview","Data Types","Missing Values","Descriptive Statistics", "Model Columns"])
     with tab1:
         st.dataframe(df.head(200), use_container_width=True, hide_index=True, height=400)
         # filtered download
@@ -1141,6 +1535,105 @@ elif nav == "🔎 Data Explorer":
         fig.update_layout(height=500, xaxis_tickangle=-30)
         st.plotly_chart(fig, use_container_width=True)
         st.caption("Correlation indicates association and does not establish causation.")
+    with tab5:
+        st.markdown("**Model output columns present on `df`**")
+        model_cols = [c for c in df.columns
+                    if c.endswith("_pred") or c.endswith("_prob")
+                    or "_prob_class_" in c or c.endswith("_submodel")]
+
+        if model_cols:
+            st.dataframe(df[model_cols].head(50), use_container_width=True, hide_index=True)
+        else:
+            st.info("No model columns — check the Models panel in the sidebar for errors.")
+
+        st.markdown("**Submodel per concept**")
+        rows = []
+        for c in MODEL_CONCEPTS:
+            col = f"{c}_submodel"
+            if col in df.columns and df[col].notna().any():
+                rows.append({"Concept": c, "Submodel": df[col].dropna().iloc[0]})
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+# ──────────────────────────────────────────────
+# Page: Models performance
+# ──────────────────────────────────────────────
+elif nav == "🧠 Model Performance":
+    st.markdown("# Model Performance")
+    st.markdown('<div class="section-desc">Trained submodels per concept with their evaluation metrics — sourced from manifests stored in MinIO.</div>', unsafe_allow_html=True)
+
+    manifests = {}
+    for concept in MODEL_CONCEPTS:
+        try:
+            manifests[concept] = load_manifest_cached(concept)
+        except Exception as e:
+            st.warning(f"Failed to load manifest for concept '{concept}': {e}")
+
+
+    if not manifests:
+        st.info("No manifests found. Train the model first")
+        st.stop()
+
+    # --- Summary table ---
+    render_section_header("Summary", "Best submodel per concept by primary metric")
+    rows = []
+    for concept, m in manifests.items():
+        task = m["task"]
+        metric_key = "roc_auc" if task=="classification" else "r2"
+        metrics = m["metrics"]
+        best = max(metrics.items(), key=lambda kv: kv[1].get(metric_key, -1) or -1)
+        best_name, best_metrics = best
+
+        # Append row
+        rows.append({
+            "Concept": concept,
+            "Task": task,
+            "Submodels": len(metrics),
+            "Best Submodel": best_name,
+            "Primary Metric": f"{metric_key} = {best_metrics.get(metric_key):.4f}",
+            "Feature Count": len(m["features"])
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # --- Per-concept detail ---
+    render_section_header("Per-Concept Detail", "All submodels, all metrics")
+    for concept, m in manifests.items():
+        with st.expander(f"{concept} - {len(m['submodels'])} submodels", expanded=False):
+            df_metrics = pd.DataFrame(m["metrics"]).T.reset_index()
+            df_metrics.rename(columns={"index": "submodel"}, inplace=True)
+
+            # Numeric formatting
+            fmt = {}
+            for c in df_metrics.columns:
+                if c != "submodel":
+                    fmt[c] = "{:.4f}"
+            st.dataframe(df_metrics.style.format(fmt), use_container_width=True, hide_index=True)
+
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                fig = px.bar(
+                    df_metrics.melt(id_vars="submodel", var_name="metric", value_name="score"),
+                    x="submodel", y="score", color="metric", barmode="group", title=f"{concept} - metrics by submodel")
+                fig.update_layout(height=320, xaxis_title="", yaxis_title="Score")
+                st.plotly_chart(fig, use_container_width=True)
+            with c2:
+                st.markdown("**Features used**")
+                st.code("\n".join(m["features"]), language="text")
+
+    # --- Prediction coverage ---
+    render_section_header("Prediction Coverage", "How many filtered rows got a model prediction")
+    cov_rows = []
+    for concept in MODEL_CONCEPTS:
+        col = f"{concept}_pred"
+        if col in df.columns:
+            cov = df[col].notna().mean()
+            cov_rows.append({"Concept": concept, "Coverage": f"{cov:.1%}",
+                             "Non-null rows": int(df[col].notna().sum())})
+
+        else:
+            cov_rows.append({"Concept": concept, "Coverage": "—", "Non-null rows": 0})
+    st.dataframe(pd.DataFrame(cov_rows), use_container_width=True, hide_index=True)
+
 
 # Footer
 st.markdown("---")

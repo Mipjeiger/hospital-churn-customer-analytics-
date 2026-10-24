@@ -54,7 +54,7 @@ def prediction_coverage_table(df: pd.DataFrame, concepts: list[str]):
             rows.append({
                 "Concept": concept,
                 "Coverage": f"{df[col].notna().mean():.1%}",
-                "Non-null type": int(df[col].notna().sum()),
+                "Non-null rows": int(df[col].notna().sum()),
             })
         else:
             rows.append({"Concept": concept, "Coverage": "—", "Non-null rows": 0})

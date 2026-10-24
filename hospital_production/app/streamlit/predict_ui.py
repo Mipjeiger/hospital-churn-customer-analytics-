@@ -35,7 +35,10 @@ def prediction_form(
     bundle = load_concept(concept)
     features = bundle["features"]
 
-    with st.form(key=form_key):
+    # Make the form key globally unique
+    unique_form_key = f"{form_key}__{concept}"
+
+    with st.form(key=unique_form_key):
         cols = st.columns(3)
         values = {}
         for i, f in enumerate(features):
@@ -44,15 +47,16 @@ def prediction_form(
 
                 if f == "service" and services:
                     idx = services.index(d) if d in services else 0
-                    values[f] = st.selectbox(f, services, index=idx, key=f"{form_key}_{f}")
+                    values[f] = st.selectbox(f, services, index=idx, key=f"{unique_form_key}_{f}")
                 elif isinstance(d, bool):
-                    values[f] = st.checkbox(f, value=d, key=f"{form_key}_{f}")
+                    values[f] = st.checkbox(f, value=d, key=f"{unique_form_key}_{f}")
                 elif isinstance(d, int):
-                    values[f] = st.number_input(f, value=int(d), step=1, key=f"{form_key}_{f}")
+                    values[f] = st.number_input(f, value=int(d), step=1, key=f"{unique_form_key}_{f}")
                 else:
-                    values[f] = st.number_input(f, value=float(d), step=0.1, key=f"{form_key}_{f}")
+                    values[f] = st.number_input(f, value=float(d), step=0.1, key=f"{unique_form_key}_{f}")
 
-            submitted = st.form_submit_button("🔮 Predict")
+        # ✅ Pass a unique key to the submit button
+        submitted = st.form_submit_button("🔮 Predict", key=f"{unique_form_key}_submit")
 
     if submitted:
         try:

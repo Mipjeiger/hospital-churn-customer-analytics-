@@ -45,6 +45,20 @@ def model_prediction_vs_observed(df: pd.DataFrame, concept: str, time_col: str =
     fig.update_layout(height=300)
     st.plotly_chart(fig, use_container_width=True)
 
+def prediction_coverage_table(df: pd.DataFrame, concepts: list[str]):
+    """Table: how many filtered rows got predictions per concept."""
+    rows = []
+    for concept in concepts:
+        col = f"{concept}_pred"
+        if col in df.columns:
+            rows.append({
+                "Concept": concept,
+                "Coverage": f"{df[col].notna().mean():.1%}",
+                "Non-null type": int(df[col].notna().sum()),
+            })
+        else:
+            rows.append({"Concept": concept, "Coverage": "—", "Non-null rows": 0})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 def service_prediction_bar(df: pd.DataFrame, concept: str, color_map: dict):
     """Bar chart: mean predicted value per service."""

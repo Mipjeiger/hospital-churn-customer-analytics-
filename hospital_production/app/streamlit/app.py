@@ -83,7 +83,6 @@ hr { border-color: #E8EEF3; }
 </style>
 """, unsafe_allow_html=True)
 
-
 # ──────────────────────────────────────────────
 # Metrics server
 # ──────────────────────────────────────────────
@@ -140,6 +139,22 @@ def _add_features(df: pd.DataFrame) -> pd.DataFrame:
         labels=CAPACITY_ORDER, include_lowest=True,
     )
 
+    # Sanitize the derived feature columns to ensure no nofinities leak into model featurs
+    feature_cols = [
+        "capacity_pressure", "staff_attendance_rate", "admission_rate_row",
+        "refusal_rate_row", "satisfaction", "patient_churn"
+    ]
+    for c in feature_cols:
+        if c in df.columns:
+            df[c] = df[c].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    df["health_score"] = (
+        0.35 * (df["satisfaction"] / 100)
+        + 0.25 * (1 - df["patient_churn"])
+        + 0.20 * df["admission_rate_row"].fillna(0)
+        + 0.20 * df["staff_attendance_rate"].fillna(0)
+    ) * 100
+
     df["risk_score"] = (
         (df["patients_request"] <= df["patients_request"].mean()).astype(float)
         + (df["patients_refused"] >= df["patients_refused"].mean()).astype(float)
@@ -148,8 +163,8 @@ def _add_features(df: pd.DataFrame) -> pd.DataFrame:
     ) / 4.0
     df["risk_level"] = pd.cut(df["risk_score"], bins=[-1, 0.25, 0.5, 0.75, 1],
                               labels=["Low", "Medium", "High", "Critical"], include_lowest=True)
+    
     return df
-
 
 @st.cache_data(show_spinner="Loading hospital dataset...")
 def load_data() -> pd.DataFrame:
@@ -157,7 +172,6 @@ def load_data() -> pd.DataFrame:
     with get_database_engine().connect() as conn:
         df = pd.read_sql(text(f"SELECT * FROM {schema}.{table}"), conn)
     return _add_features(df)
-
 
 # ──────────────────────────────────────────────
 # Model loading & prediction
@@ -1181,7 +1195,7 @@ def page_service_performance():
                 "staff_attendance_rate": 26 / 30,
                 "service": "general_medicine",
             },
-            form_key="form_service_perf",
+            form_key="form_service_perf_page",
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
 

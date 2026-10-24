@@ -11,10 +11,17 @@ mlflow.set_experiment(settings.MLFLOW_EXPERIMENT)
 
 # ========== Traced LLM router ==========
 @mlflow.trace(span_type=SpanType.LLM, name="llm_router")
-def traced_llm(messages, tools=None, temperature=0.3, max_tokens=512):
+def traced_llm(messages, tools=None, temperature=0.3, max_tokens=512, model_name="router"):
     """MLflow traced LLM router"""
     start = time.time()
-    out = llm_router(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
+
+    # Define the provider models which is integrated to LLM
+    out = llm_router(messages, 
+                     tools=tools, 
+                     temperature=temperature, 
+                     max_tokens=max_tokens, 
+                     provider_name=model_name)
+    
     latency = time.time() - start
 
     # Attach metadata to current span
@@ -23,7 +30,7 @@ def traced_llm(messages, tools=None, temperature=0.3, max_tokens=512):
             "provider": out["provider"],
             "has_tools": str(tools is not None)
         },
-        data={
+        metadata={
             "request_preview": str(messages[-1]["content"][:500]),
             "response_preview": str(out["text"][:500]),
         }

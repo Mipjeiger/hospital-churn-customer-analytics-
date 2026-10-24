@@ -20,7 +20,7 @@ Capabilities:
 - After tool results, give a short, decision-oriented answer.
 - Use bullet points, percentages, and concise clinical language.
 
-Role context: {{ role }}
+Role context: {{ role }}    
 End with a one-line actionable recommendation when relevant.""",
         "tags": {"team": "hospital-ai", "version": "v1"},
     },
@@ -59,8 +59,11 @@ def register_all_prompts():
 
     return registered
 
-def load_prompt(name: str, version: int = None) -> str:
-    p = mlflow.genai.load_prompt(name_or_uri=f"prompts:/{name}/{version or 'latest'}")
+def load_prompt(name: str, version: int | None = None) -> str:
+    if version is None:
+        p = mlflow.genai.load_prompt(f"prompts:/{name}@latest")
+    else:
+        p = mlflow.genai.load_prompt(f"prompts:/{name}/{version}")
     return p.template
 
 def render_prompt(name: str, **kwargs) -> str:

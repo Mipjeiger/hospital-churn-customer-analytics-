@@ -3,17 +3,37 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parents[2] / ".env")
 
 import json
-from langfuse import Langfuse, observe, get_client
+import logging
+from langfuse import observe, get_client, Langfuse
 from huggingface_hub import InferenceClient
 from groq import Groq
 from openai import OpenAI
 from app.api.config import settings
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 """Langfused traced LLM agent"""
 
 # Configuration LLM API keys
-langfuse = Langfuse(public_key=settings.LANGFUSE_PUBLIC_KEY, secret_key=settings.LANGFUSE_SECRET_KEY, host=settings.LANGFUSE_HOST)
-hf = InferenceClient(token=settings.HUGGINGFACE_API_KEY) if settings.HUGGINGFACE_API_KEY else None
+if not settings.LANGFUSE_PUBLIC_KEY:
+    raise RuntimeError("LANGFUSE_PUBLIC_KEY is not set in .env. Please set it to your Langfuse public key.")
+
+if not settings.LANGFUSE_SECRET_KEY:
+    raise RuntimeError("LANGFUSE_SECRET_KEY is not set in .env. Please set it to your Langfuse secret key.")
+
+# Langfuse client configuration
+langfuse = get_client() 
+
+# Hunggingface Configuration
+hf = (
+    InferenceClient(
+        token=settings.HUGGINGFACE_API_KEY,
+        base_url="https://router.huggingface.co",
+    )
+    if settings.HUGGINGFACE_API_KEY
+    else None
+)
 groq = Groq(api_key=settings.GROQ_API_KEY) if settings.GROQ_API_KEY else None
 ninerouter = OpenAI(api_key=settings.NINEROUTER_API_KEY, base_url=settings.NINEROUTER_BASE_URL) if settings.NINEROUTER_API_KEY else None
 
@@ -62,7 +82,7 @@ def _call(client, model, messages, tools, max_tokens, temperature):
 
 # Observe langfuse endpoint LLM agent
 @observe(name="llm-router")
-def llm_router(messages, tools=None, temperature=0.3, max_tokens=512):
+def llm_router(messages, tools=None, temperature=0.3, max_tokens=512, provider_name="router"):
     """Langfuse traced LLM agent for multiple LLM providers"""
     messages = _normalize_messages(messages)
     langfuse = get_client()
@@ -73,9 +93,20 @@ def llm_router(messages, tools=None, temperature=0.3, max_tokens=512):
         ("ninerouter", ninerouter, "sragent", _call),
     ]
 
-    for provider_name, client_obj, model_name, call_fn in providers:
-        if not client_obj:
-            continue
+    valid_providers = {"router", "huggingface", "groq", "ninerouter"}
+
+    if provider_name not in valid_providers:
+        raise ValueError(
+            f"Unsupported provider '{provider_name}'. "
+            f"Choose one of: {sorted(valid_providers)}"
+        )
+
+    if provider_name != "router":
+        providers = [provider for provider in providers if provider[0] == provider_name]
+
+    for selected_provider, client_obj, model_name, call_fn in providers:
+        if client_obj is None:
+            continue  # Skip if the client is not configured
 
         try:
             r = call_fn(client_obj, model_name, messages, tools, max_tokens, temperature)
@@ -85,26 +116,31 @@ def llm_router(messages, tools=None, temperature=0.3, max_tokens=512):
             # Update observation using get_client() SDK method
             langfuse.update_current_span(
                 level="DEFAULT",
-                status_message=f"{provider_name} responded",
+                status_message=f"{selected_provider} responded",
                 output=content,
                 metadata={
                     "model": model_name,
-                    "provider": provider_name,
+                    "provider": selected_provider,
                 },
             )
 
             return {
                 "text": content,
                 "tool_calls": getattr(message, "tool_calls", None),
-                "provider": provider_name
+                "provider": selected_provider
             }
 
-        except Exception as e:
-            err_str = str(e)
-            print(f"⚠️ {provider_name} failed: {type(e).__name__}: {err_str}")
+        except Exception as exc:
+            logger.exception(
+                "%s provider failed",
+                selected_provider,
+            )
+
             langfuse.update_current_span(
                 level="ERROR",
-                status_message=f"{provider_name} failed: {err_str[:200]}",
+                status_message=(
+                    f"{selected_provider} failed: {str(exc)[:200]}"
+                ),
             )
             
     raise RuntimeError("All LLM providers failed")

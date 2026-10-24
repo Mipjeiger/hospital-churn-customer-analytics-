@@ -1,31 +1,108 @@
-from prometheus_client import Counter, Gauge, start_http_server
+import prometheus_client
+from prometheus_client import CollectorRegistry, Counter, Gauge, start_http_server
 
 STREAMLIT_METRICS_PORT = 8502
 
-# Logic landing page for monitoring on the prometheus
-PAGE_VIEWS = Counter(
-    "streamlit_page_views_total",
-    "Number of Streamlit script runs",
+
+def _get_registry() -> CollectorRegistry:
+    registry = getattr(
+        prometheus_client,
+        "_hospital_streamlit_registry",
+        None,
+    )
+
+    if registry is None:
+        registry = CollectorRegistry()
+        setattr(
+            prometheus_client,
+            "_hospital_streamlit_registry",
+            registry,
+        )
+
+    return registry
+
+
+REGISTRY = _get_registry()
+
+
+def _get_metric(name: str, factory):
+    metric = getattr(
+        prometheus_client,
+        f"_hospital_streamlit_{name}",
+        None,
+    )
+
+    if metric is None:
+        metric = factory()
+        setattr(
+            prometheus_client,
+            f"_hospital_streamlit_{name}",
+            metric,
+        )
+
+    return metric
+
+
+PAGE_VIEWS = _get_metric(
+    "page_views",
+    lambda: Counter(
+        "streamlit_page_views_total",
+        "Number of Streamlit script runs",
+        registry=REGISTRY,
+    ),
 )
-FILTERED_ROWS = Gauge(
-    "streamlit_filtered_rows",
-    "Number of rows in the currently filtered dashboard data",
+
+FILTERED_ROWS = _get_metric(
+    "filtered_rows",
+    lambda: Gauge(
+        "streamlit_filtered_rows",
+        "Number of rows in the currently filtered dashboard data",
+        registry=REGISTRY,
+    ),
 )
-FILTERED_CHURN_RATE = Gauge(
-    "streamlit_filtered_churn_rate",
-    "Churn rate in the currently filtered dashboard data",
+
+FILTERED_CHURN_RATE = _get_metric(
+    "filtered_churn_rate",
+    lambda: Gauge(
+        "streamlit_filtered_churn_rate",
+        "Churn rate in the currently filtered dashboard data",
+        registry=REGISTRY,
+    ),
 )
-FILTERED_AVG_SATISFACTION = Gauge(
-    "streamlit_filtered_average_satisfaction",
-    "Average satisfaction in the currently filtered dashboard data",
+
+FILTERED_AVG_SATISFACTION = _get_metric(
+    "filtered_average_satisfaction",
+    lambda: Gauge(
+        "streamlit_filtered_average_satisfaction",
+        "Average satisfaction in the currently filtered dashboard data",
+        registry=REGISTRY,
+    ),
 )
+
 
 def start_metrics_server() -> None:
-    start_http_server(STREAMLIT_METRICS_PORT, addr="0.0.0.0")
+    server_started = getattr(
+        prometheus_client,
+        "_hospital_streamlit_server_started",
+        False,
+    )
 
-# ==========================
-# Function to call and ensuring that metrics are updated in the prometheus dashboard
-# ==========================
+    if server_started:
+        return
+
+    start_http_server(
+        STREAMLIT_METRICS_PORT,
+        addr="0.0.0.0",
+        registry=REGISTRY,
+    )
+
+    setattr(
+        prometheus_client,
+        "_hospital_streamlit_server_started",
+        True,
+    )
+
+
 def update_dashboard_metrics(
     row_count: int,
     churn_rate: float,

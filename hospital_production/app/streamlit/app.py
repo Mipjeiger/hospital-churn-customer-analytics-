@@ -324,6 +324,29 @@ def attach_predictions(df: pd.DataFrame, choices: dict[str, str]) -> tuple[pd.Da
         df = df.merge(pf, on="patient_id", how="left")
     return df, errors
 
+def attach_router_prediction(concept: str, submodel: str, source_df: pd.DataFrame) -> pd.DataFrame | None:
+    """Run a selected model against the database rows after Predict is clicked."""
+    try:
+        prediction_key = f"{concept}_{submodel}_{len(source_df)}"
+        prediction_df = predict_with_bundle(
+            concept=concept,
+            submodel=submodel,
+            df_hash=prediction_key,
+            df=source_df
+        )
+
+        return source_df.merge(
+            prediction_df,
+            on="patient_id",
+            how="left",
+        )
+
+    except Exception as e:
+        st.error(f"Prediction failed for {concept} with submodel {submodel}: {e}")
+        return None
+
+def render_prediction_required_message(concept: str) -> None:
+    st.info(f"Click **Predict** to calculate the `{concept}` model results for the database records and display the graph. ")
 
 # ──────────────────────────────────────────────
 # Load data & build sidebar
@@ -375,14 +398,6 @@ with st.sidebar:
 
     st.markdown("### 🎛️ Model Selection")
     choices = build_model_selection(manifests)
-
-# Compute predictions
-df_raw, model_errors = attach_predictions(df_raw, choices)
-if model_errors:
-    with st.sidebar:
-        st.error(f"⚠️ {len(model_errors)} model(s) failed to predict:")
-        for c, e in model_errors.items():
-            st.caption(f"**{c}**: {e}")
 
 # Apply filters
 df = df_raw.copy()
@@ -609,18 +624,29 @@ def page_patient_analytics():
         styled_chart(fig, height=300)
 
     # ── NEW: manual prediction form + bulk charts via charts.py
-    render_section_header("Manual Churn Prediction",
-                          "Enter features and click Predict to see the model output for a single patient.")
+    render_section_header(
+        "Patient Churn Prediction",
+        "Click Predict to run the patient-churn model against the database records.",
+    )
+
+    patient_prediction = None
+
     if "patient_churn" in choices:
-        predict_ui.prediction_form(
+        patient_prediction = predict_ui.prediction_form(
             concept="patient_churn",
             submodel=choices["patient_churn"],
             defaults={
-                "age": 45, "satisfaction": 70, "length_of_stay": 5,
-                "available_beds": 20, "patients_request": 40,
-                "patients_admitted": 30, "patients_refused": 10,
-                "staff_morale": 70, "staff_present": 25,
-                "total_staff": 30, "staff_absent": 5,
+                "age": 45,
+                "satisfaction": 70,
+                "length_of_stay": 5,
+                "available_beds": 20,
+                "patients_request": 40,
+                "patients_admitted": 30,
+                "patients_refused": 10,
+                "staff_morale": 70,
+                "staff_present": 25,
+                "total_staff": 30,
+                "staff_absent": 5,
                 "capacity_pressure": 40 / 21,
                 "admission_rate_row": 30 / 40,
                 "refusal_rate_row": 10 / 40,
@@ -630,6 +656,39 @@ def page_patient_analytics():
             form_key="form_churn_pa",
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
+
+    if patient_prediction is None:
+        render_prediction_required_message("patient_churn")
+    else:
+        patient_prediction_df = attach_router_prediction(
+            concept="patient_churn",
+            submodel=choices["patient_churn"],
+            source_df=df
+        )
+
+        if patient_prediction_df is not None:
+            render_section_header(
+                "Database Churn Predictions",
+                "The graph is based on patient records loaded from PostgreSQL.",
+            )
+
+            model_badge(
+                "patient_churn",
+                patient_prediction_df,
+            )
+
+            c1, c2 = st.columns(2)
+
+            with c1:
+                charts.churn_distribution(
+                    patient_prediction_df,
+                    CHURN_COLORS,
+                )
+
+            with c2:
+                charts.churn_confusion(
+                    patient_prediction_df,
+                )
 
     render_section_header("Bulk Predictions on Filtered Data")
     model_badge("patient_churn", df)
@@ -667,20 +726,30 @@ def page_patient_management():
 
     if empty_guard(df):
         return
+    
+    render_section_header(
+        "Risk-Level Prediction",
+        "Click Predict to run the risk-level model against the database records."
+    )
 
-    # ── NEW: manual risk-level prediction at the top
-    render_section_header("Manual Risk-Level Prediction",
-                          "Predict the risk class for a hypothetical patient.")
+    risk_prediction = None
+
     if "risk_level" in choices:
-        predict_ui.prediction_form(
+        risk_prediction = predict_ui.prediction_form(
             concept="risk_level",
             submodel=choices["risk_level"],
             defaults={
-                "age": 55, "satisfaction": 60, "length_of_stay": 7,
-                "available_beds": 15, "patients_request": 50,
-                "patients_admitted": 35, "patients_refused": 15,
-                "staff_morale": 65, "staff_present": 22,
-                "total_staff": 30, "staff_absent": 8,
+                "age": 55,
+                "satisfaction": 60,
+                "length_of_stay": 7,
+                "available_beds": 15,
+                "patients_request": 50,
+                "patients_admitted": 35,
+                "patients_refused": 15,
+                "staff_morale": 65,
+                "staff_present": 22,
+                "total_staff": 30,
+                "staff_absent": 8,
                 "capacity_pressure": 50 / 16,
                 "admission_rate_row": 35 / 50,
                 "refusal_rate_row": 15 / 50,
@@ -690,6 +759,49 @@ def page_patient_management():
             form_key="form_risk_pm",
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
+
+    if risk_prediction is None:
+        render_prediction_required_message("risk_level")
+    else:
+        risk_prediction_df = attach_router_prediction(
+            concept="risk_level",
+            submodel=choices["risk_level"],
+            source_df=df,
+        )
+
+        if risk_prediction_df is not None:
+            st.subheader("Database Risk-Level Predictions")
+
+            risk_counts = (
+                risk_prediction_df["risk_level_pred"]
+                .dropna()
+                .astype(str)
+                .str.title()
+                .value_counts()
+                .reindex(RISK_ORDER, fill_value=0)
+                .rename_axis("risk_level")
+                .reset_index(name="patients")
+            )
+
+            fig = px.bar(
+                risk_counts,
+                x="risk_level",
+                y="patients",
+                color="risk_level",
+                color_discrete_map=RISK_COLORS,
+                text="patients",
+            )
+
+            fig.update_traces(textposition="outside")
+
+            styled_chart(
+                fig,
+                height=320,
+                showlegend=False,
+                xaxis_title="Predicted risk level",
+                yaxis_title="Patients",
+            )
+
     st.markdown("---")
 
     c1, c2, c3, c4 = st.columns(4)
@@ -792,19 +904,29 @@ def page_churn_analytics():
     if empty_guard(df):
         return
 
-    # ── NEW: manual churn prediction
-    render_section_header("Manual Churn Prediction",
-                          "Test the model against a hypothetical patient.")
+    render_section_header(
+        "Churn Prediction",
+        "Click Predict to calculate model predictions for database records.",
+    )
+
+    churn_prediction = None
+
     if "patient_churn" in choices:
-        predict_ui.prediction_form(
+        churn_prediction = predict_ui.prediction_form(
             concept="patient_churn",
             submodel=choices["patient_churn"],
             defaults={
-                "age": 35, "satisfaction": 55, "length_of_stay": 4,
-                "available_beds": 25, "patients_request": 30,
-                "patients_admitted": 22, "patients_refused": 8,
-                "staff_morale": 60, "staff_present": 20,
-                "total_staff": 28, "staff_absent": 8,
+                "age": 35,
+                "satisfaction": 55,
+                "length_of_stay": 4,
+                "available_beds": 25,
+                "patients_request": 30,
+                "patients_admitted": 22,
+                "patients_refused": 8,
+                "staff_morale": 60,
+                "staff_present": 20,
+                "total_staff": 28,
+                "staff_absent": 8,
                 "capacity_pressure": 30 / 26,
                 "admission_rate_row": 22 / 30,
                 "refusal_rate_row": 8 / 30,
@@ -814,6 +936,38 @@ def page_churn_analytics():
             form_key="form_churn_ca",
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
+
+    if churn_prediction is None:
+        render_prediction_required_message("patient_churn")
+    else:
+        churn_prediction_df = attach_router_prediction(
+            concept="patient_churn",
+            submodel=choices["patient_churn"],
+            source_df=df,
+        )
+
+        if churn_prediction_df is not None:
+            c1, c2 = st.columns(2)
+
+            with c1:
+                render_section_header(
+                    "Predicted Churn Distribution",
+                    "Model result for the filtered database records.",
+                )
+                charts.churn_distribution(
+                    churn_prediction_df,
+                    CHURN_COLORS,
+                )
+
+            with c2:
+                render_section_header(
+                    "Predicted Churn Confusion",
+                    "Observed database churn compared with model predictions.",
+                )
+                charts.churn_confusion(
+                    churn_prediction_df,
+                )
+    
     st.markdown("---")
 
     c1, c2 = st.columns(2)
@@ -924,19 +1078,29 @@ def page_hospital_operations():
     if empty_guard(df):
         return
 
-    # ── NEW: manual risk-score prediction
-    render_section_header("Manual Risk-Score Prediction",
-                          "Predict the risk score for a hypothetical record.")
+    render_section_header(
+        "Risk-Score Prediction",
+        "Click Predict to run the risk-score model against database records.",
+    )
+
+    risk_score_prediction = None
+
     if "risk_score" in choices:
-        predict_ui.prediction_form(
+        risk_score_prediction = predict_ui.prediction_form(
             concept="risk_score",
             submodel=choices["risk_score"],
             defaults={
-                "age": 50, "satisfaction": 65, "length_of_stay": 6,
-                "available_beds": 18, "patients_request": 45,
-                "patients_admitted": 32, "patients_refused": 13,
-                "staff_morale": 68, "staff_present": 24,
-                "total_staff": 30, "staff_absent": 6,
+                "age": 50,
+                "satisfaction": 65,
+                "length_of_stay": 6,
+                "available_beds": 18,
+                "patients_request": 45,
+                "patients_admitted": 32,
+                "patients_refused": 13,
+                "staff_morale": 68,
+                "staff_present": 24,
+                "total_staff": 30,
+                "staff_absent": 6,
                 "capacity_pressure": 45 / 19,
                 "admission_rate_row": 32 / 45,
                 "refusal_rate_row": 13 / 45,
@@ -947,9 +1111,31 @@ def page_hospital_operations():
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
 
+    if risk_score_prediction is None:
+        render_prediction_required_message("risk_score")
+    else:
+        risk_score_df = attach_router_prediction(
+            concept="risk_score",
+            submodel=choices["risk_score"],
+            source_df=df,
+        )
+
+        if risk_score_df is not None:
+            render_section_header(
+                "Predicted Risk Score by Service",
+                "Model result calculated from the filtered database records.",
+            )
+
+            model_badge("risk_score", risk_score_df)
+
+            charts.service_prediction_bar(
+                risk_score_df,
+                "risk_score",
+                SERVICE_COLORS,
+            )
+
     render_section_header("Model-Predicted Risk Score by Service")
     model_badge("risk_score", df)
-    charts.service_prediction_bar(df, "risk_score", SERVICE_COLORS)
 
     render_section_header("Requests vs Admissions — Monthly")
     mon = (df.groupby(df["arrival_date"].dt.to_period("M"))
@@ -1051,21 +1237,33 @@ def page_staff_analytics():
     if empty_guard(df):
         return
 
-    # ── NEW: manual staff predictions
-    render_section_header("Manual Staff Prediction",
-                          "Predict morale and attendance for a hypothetical configuration.")
-    cL, cR = st.columns(2)
-    with cL:
+    # Staff model predictions features
+    render_section_header(
+        "Staff Model Predictions",
+        "Submit either form to calculate predictions for the database records.",
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        morale_prediction = None
+
         if "staff_staff_morale" in choices:
-            predict_ui.prediction_form(
+            morale_prediction = predict_ui.prediction_form(
                 concept="staff_staff_morale",
                 submodel=choices["staff_staff_morale"],
                 defaults={
-                    "age": 40, "satisfaction": 70, "length_of_stay": 5,
-                    "available_beds": 20, "patients_request": 35,
-                    "patients_admitted": 28, "patients_refused": 7,
-                    "staff_morale": 70, "staff_present": 24,
-                    "total_staff": 30, "staff_absent": 6,
+                    "age": 40,
+                    "satisfaction": 70,
+                    "length_of_stay": 5,
+                    "available_beds": 20,
+                    "patients_request": 35,
+                    "patients_admitted": 28,
+                    "patients_refused": 7,
+                    "staff_morale": 70,
+                    "staff_present": 24,
+                    "total_staff": 30,
+                    "staff_absent": 6,
                     "capacity_pressure": 35 / 21,
                     "admission_rate_row": 28 / 35,
                     "refusal_rate_row": 7 / 35,
@@ -1075,17 +1273,43 @@ def page_staff_analytics():
                 form_key="form_morale",
                 services=sorted(df_raw["service"].dropna().unique().tolist()),
             )
-    with cR:
+
+        if morale_prediction is None:
+            render_prediction_required_message("staff_staff_morale")
+        else:
+            morale_df = attach_router_prediction(
+                concept="staff_staff_morale",
+                submodel=choices["staff_staff_morale"],
+                source_df=df,
+            )
+
+            if morale_df is not None:
+                model_badge("staff_staff_morale", morale_df)
+                charts.service_prediction_bar(
+                    morale_df,
+                    "staff_staff_morale",
+                    SERVICE_COLORS,
+                )
+
+    with c2:
+        attendance_prediction = None
+
         if "staff_staff_attendance_rate" in choices:
-            predict_ui.prediction_form(
+            attendance_prediction = predict_ui.prediction_form(
                 concept="staff_staff_attendance_rate",
                 submodel=choices["staff_staff_attendance_rate"],
                 defaults={
-                    "age": 40, "satisfaction": 70, "length_of_stay": 5,
-                    "available_beds": 20, "patients_request": 35,
-                    "patients_admitted": 28, "patients_refused": 7,
-                    "staff_morale": 70, "staff_present": 24,
-                    "total_staff": 30, "staff_absent": 6,
+                    "age": 40,
+                    "satisfaction": 70,
+                    "length_of_stay": 5,
+                    "available_beds": 20,
+                    "patients_request": 35,
+                    "patients_admitted": 28,
+                    "patients_refused": 7,
+                    "staff_morale": 70,
+                    "staff_present": 24,
+                    "total_staff": 30,
+                    "staff_absent": 6,
                     "capacity_pressure": 35 / 21,
                     "admission_rate_row": 28 / 35,
                     "refusal_rate_row": 7 / 35,
@@ -1096,9 +1320,30 @@ def page_staff_analytics():
                 services=sorted(df_raw["service"].dropna().unique().tolist()),
             )
 
+        if attendance_prediction is None:
+            render_prediction_required_message(
+                "staff_staff_attendance_rate"
+            )
+        else:
+            attendance_df = attach_router_prediction(
+                concept="staff_staff_attendance_rate",
+                submodel=choices["staff_staff_attendance_rate"],
+                source_df=df,
+            )
+
+            if attendance_df is not None:
+                model_badge(
+                    "staff_staff_attendance_rate",
+                    attendance_df,
+                )
+                charts.service_prediction_bar(
+                    attendance_df,
+                    "staff_staff_attendance_rate",
+                    SERVICE_COLORS,
+                )
+    
     render_section_header("Bulk Predictions — Observed vs Predicted")
     model_badge("staff_staff_morale", df)
-    charts.model_prediction_vs_observed(df, "staff_staff_morale", time_col="arrival_date")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1137,7 +1382,7 @@ def page_staff_analytics():
                           title=dict(text=f"r = {corr:.2f}", font=dict(size=12)))
         st.plotly_chart(fig, use_container_width=True)
         st.caption("Correlation ≠ causation.")
-
+    
     render_section_header("Staff Absence vs Patient Churn")
     df["_abs_bin"] = pd.cut(df["staff_absent"], bins=[-1, 2, 8, 20, 100],
                             labels=["0–2", "3–8", "9–20", "21+"])
@@ -1176,19 +1421,29 @@ def page_service_performance():
     if empty_guard(df):
         return
 
-    # ── NEW: manual service-performance prediction
-    render_section_header("Manual Service-Performance Prediction",
-                          "Predict the health score for a hypothetical configuration.")
+    render_section_header(
+        "Service-Performance Prediction",
+        "Click Predict to run the service-performance model against database records.",
+    )
+
+    service_prediction = None
+
     if "service_performance" in choices:
-        predict_ui.prediction_form(
+        service_prediction = predict_ui.prediction_form(
             concept="service_performance",
             submodel=choices["service_performance"],
             defaults={
-                "age": 45, "satisfaction": 75, "length_of_stay": 4,
-                "available_beds": 22, "patients_request": 40,
-                "patients_admitted": 32, "patients_refused": 8,
-                "staff_morale": 72, "staff_present": 26,
-                "total_staff": 30, "staff_absent": 4,
+                "age": 45,
+                "satisfaction": 75,
+                "length_of_stay": 4,
+                "available_beds": 22,
+                "patients_request": 40,
+                "patients_admitted": 32,
+                "patients_refused": 8,
+                "staff_morale": 72,
+                "staff_present": 26,
+                "total_staff": 30,
+                "staff_absent": 4,
                 "capacity_pressure": 40 / 23,
                 "admission_rate_row": 32 / 40,
                 "refusal_rate_row": 8 / 40,
@@ -1199,9 +1454,29 @@ def page_service_performance():
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
 
+    if service_prediction is None:
+        render_prediction_required_message("service_performance")
+    else:
+        service_prediction_df = attach_router_prediction(
+            concept="service_performance",
+            submodel=choices["service_performance"],
+            source_df=df,
+        )
+
+        if service_prediction_df is not None:
+            model_badge(
+                "service_performance",
+                service_prediction_df,
+            )
+
+            charts.service_prediction_bar(
+                service_prediction_df,
+                "service_performance",
+                SERVICE_COLORS,
+            )
+
     render_section_header("Model-Predicted Service Health")
     model_badge("service_performance", df)
-    charts.service_prediction_bar(df, "service_performance", SERVICE_COLORS)
 
     tbl = (df.groupby("service")
            .agg(patients=("patient_id", "count"),
@@ -1296,19 +1571,29 @@ def page_operational_risk():
     if empty_guard(df):
         return
 
-    # ── NEW: manual risk-level prediction
-    render_section_header("Manual Operational-Risk Prediction",
-                          "Enter metrics and predict the risk class.")
+    render_section_header(
+        "Risk-Level Prediction",
+        "Click Predict to run the risk-level classifier against database records.",
+    )
+
+    risk_level_prediction = None
+
     if "risk_level" in choices:
-        predict_ui.prediction_form(
+        risk_level_prediction = predict_ui.prediction_form(
             concept="risk_level",
             submodel=choices["risk_level"],
             defaults={
-                "age": 50, "satisfaction": 55, "length_of_stay": 8,
-                "available_beds": 10, "patients_request": 55,
-                "patients_admitted": 35, "patients_refused": 20,
-                "staff_morale": 55, "staff_present": 18,
-                "total_staff": 30, "staff_absent": 12,
+                "age": 50,
+                "satisfaction": 55,
+                "length_of_stay": 8,
+                "available_beds": 10,
+                "patients_request": 55,
+                "patients_admitted": 35,
+                "patients_refused": 20,
+                "staff_morale": 55,
+                "staff_present": 18,
+                "total_staff": 30,
+                "staff_absent": 12,
                 "capacity_pressure": 55 / 11,
                 "admission_rate_row": 35 / 55,
                 "refusal_rate_row": 20 / 55,
@@ -1318,6 +1603,52 @@ def page_operational_risk():
             form_key="form_risk_ops",
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
+
+    if risk_level_prediction is None:
+        render_prediction_required_message("risk_level")
+    else:
+        risk_level_df = attach_router_prediction(
+            concept="risk_level",
+            submodel=choices["risk_level"],
+            source_df=df,
+        )
+
+        if risk_level_df is not None:
+            render_section_header(
+                "Predicted Risk-Level Distribution",
+                "Model result calculated from the filtered database records.",
+            )
+
+            risk_counts = (
+                risk_level_df["risk_level_pred"]
+                .dropna()
+                .astype(str)
+                .str.title()
+                .value_counts()
+                .reindex(RISK_ORDER, fill_value=0)
+                .rename_axis("risk_level")
+                .reset_index(name="patients")
+            )
+
+            fig = px.bar(
+                risk_counts,
+                x="risk_level",
+                y="patients",
+                color="risk_level",
+                color_discrete_map=RISK_COLORS,
+                text="patients",
+            )
+
+            fig.update_traces(textposition="outside")
+
+            styled_chart(
+                fig,
+                height=320,
+                showlegend=False,
+                xaxis_title="Predicted risk level",
+                yaxis_title="Patients",
+            )
+    
     st.markdown("---")
 
     cols = st.columns(4)

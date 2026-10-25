@@ -44,10 +44,10 @@ MODEL_CONCEPTS = [
 ]
 
 NAV_PAGES = [
-    "🏥 Overview", "👥 Patient Analytics", "🧑‍⚕️ Patient Management",
-    "📉 Churn Analytics", "🛏️ Hospital Operations", "👨‍⚕️ Staff Analytics",
-    "📊 Service Performance", "⚠️ Operational Risk", "🧠 Model Performance",
-    "💡 Management Insights", "🔎 Data Explorer",
+    "Overview", "Patient Analytics", "Patient Management",
+    "Churn Analytics", "Hospital Operations", "Staff Analytics",
+    "Service Performance", "Operational Risk", "Model Performance",
+    "Management Insights", "Data Explorer",
 ]
 
 # ──────────────────────────────────────────────
@@ -179,7 +179,6 @@ def load_data() -> pd.DataFrame:
 @st.cache_resource
 def load_bundle_cached(concept: str):
     return load_concept(concept)
-
 
 @st.cache_data
 def load_manifest_cached(concept: str) -> dict:
@@ -343,10 +342,13 @@ def attach_router_prediction(concept: str, submodel: str, source_df: pd.DataFram
 
     except Exception as e:
         st.error(f"Prediction failed for {concept} with submodel {submodel}: {e}")
-        return None
+        return source_df
 
 def render_prediction_required_message(concept: str) -> None:
-    st.info(f"Click **Predict** to calculate the `{concept}` model results for the database records and display the graph. ")
+    st.info(
+        f"Click **Predict** to calculate the `{concept}` model results for the database records and display the graph. "
+        "If you have already submitted a form, the chart will update accordingly."
+    )
 
 # ──────────────────────────────────────────────
 # Load data & build sidebar
@@ -1221,7 +1223,6 @@ def page_hospital_operations():
     if svc_ref.loc[worst, "rate"] > refusal_rate + 0.05:
         render_insight(f"<b>{worst}</b> has the highest refusal rate ({svc_ref.loc[worst, 'rate']:.1%}) — investigate service-specific bottlenecks.")
 
-
 def page_staff_analytics():
     st.markdown("# Staff Analytics")
     st.markdown('<div class="section-desc">Staffing levels, morale, attendance and associations with patient outcomes. '
@@ -1277,19 +1278,23 @@ def page_staff_analytics():
         if morale_prediction is None:
             render_prediction_required_message("staff_staff_morale")
         else:
-            morale_df = attach_router_prediction(
-                concept="staff_staff_morale",
-                submodel=choices["staff_staff_morale"],
-                source_df=df,
-            )
+            inp = morale_prediction.get("_input", {})
+            service_val = inp.get("service", "unknown")
+            pred_val = morale_prediction.get("prediction")
 
-            if morale_df is not None:
-                model_badge("staff_staff_morale", morale_df)
-                charts.service_prediction_bar(
-                    morale_df,
-                    "staff_staff_morale",
-                    SERVICE_COLORS,
-                )
+            # Build an updated DataFrame by inserting the single prediction into the full dataset
+            updated_df = df.copy()
+            pred_col = "staff_staff_morale_pred"
+            if pred_col not in updated_df.columns:
+                updated_df[pred_col] = pd.NA
+            mask = updated_df["service"] == service_val
+            updated_df.loc[mask, pred_col] = pred_val
+            model_badge("staff_staff_morale", pd.DataFrame(updated_df))
+            charts.service_prediction_bar(
+                pd.DataFrame(updated_df),
+                "staff_staff_morale",
+                SERVICE_COLORS,
+            )
 
     with c2:
         attendance_prediction = None
@@ -1320,27 +1325,25 @@ def page_staff_analytics():
                 services=sorted(df_raw["service"].dropna().unique().tolist()),
             )
 
-        if attendance_prediction is None:
-            render_prediction_required_message(
-                "staff_staff_attendance_rate"
+        # Build an updated DataFrame by inserting the single attendance prediction into the full dataset
+        if attendance_prediction is not None:
+            inp = attendance_prediction.get("_input", {})
+            service_val = inp.get("service", "unknown")
+            pred_val = attendance_prediction.get("prediction")
+            updated_att_df = df.copy()
+            pred_col = "staff_staff_attendance_rate_pred"
+            if pred_col not in updated_att_df.columns:
+                updated_att_df[pred_col] = pd.NA
+            mask = updated_att_df["service"] == service_val
+            updated_att_df.loc[mask, pred_col] = pred_val
+            model_badge("staff_staff_attendance_rate", pd.DataFrame(updated_att_df))
+            charts.service_prediction_bar(
+                pd.DataFrame(updated_att_df),
+                "staff_staff_attendance_rate",
+                SERVICE_COLORS,
             )
         else:
-            attendance_df = attach_router_prediction(
-                concept="staff_staff_attendance_rate",
-                submodel=choices["staff_staff_attendance_rate"],
-                source_df=df,
-            )
-
-            if attendance_df is not None:
-                model_badge(
-                    "staff_staff_attendance_rate",
-                    attendance_df,
-                )
-                charts.service_prediction_bar(
-                    attendance_df,
-                    "staff_staff_attendance_rate",
-                    SERVICE_COLORS,
-                )
+            render_prediction_required_message("staff_staff_attendance_rate")
     
     render_section_header("Bulk Predictions — Observed vs Predicted")
     model_badge("staff_staff_morale", df)
@@ -1766,7 +1769,6 @@ def page_model_performance():
     render_section_header("Prediction Coverage")
     charts.prediction_coverage_table(df, MODEL_CONCEPTS)
 
-
 def page_management_insights():
     st.markdown("# Management Insights")
     st.markdown('<div class="section-desc">Auto-generated from the current filtered dataset. '
@@ -1944,17 +1946,17 @@ def page_data_explorer():
 # Router
 # ──────────────────────────────────────────────
 PAGE_FUNCTIONS = {
-    "🏥 Overview": page_overview,
-    "👥 Patient Analytics": page_patient_analytics,
-    "🧑‍⚕️ Patient Management": page_patient_management,
-    "📉 Churn Analytics": page_churn_analytics,
-    "🛏️ Hospital Operations": page_hospital_operations,
-    "👨‍⚕️ Staff Analytics": page_staff_analytics,
-    "📊 Service Performance": page_service_performance,
-    "⚠️ Operational Risk": page_operational_risk,
-    "🧠 Model Performance": page_model_performance,
-    "💡 Management Insights": page_management_insights,
-    "🔎 Data Explorer": page_data_explorer,
+    "Overview": page_overview,
+    "Patient Analytics": page_patient_analytics,
+    "Patient Management": page_patient_management,
+    "Churn Analytics": page_churn_analytics,
+    "Hospital Operations": page_hospital_operations,
+    "Staff Analytics": page_staff_analytics,
+    "Service Performance": page_service_performance,
+    "Operational Risk": page_operational_risk,
+    "Model Performance": page_model_performance,
+    "Management Insights": page_management_insights,
+    "Data Explorer": page_data_explorer,
 }
 
 PAGE_FUNCTIONS[nav]()

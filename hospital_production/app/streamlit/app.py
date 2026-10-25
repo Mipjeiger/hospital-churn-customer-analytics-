@@ -180,7 +180,6 @@ def load_data() -> pd.DataFrame:
 def load_bundle_cached(concept: str):
     return load_concept(concept)
 
-
 @st.cache_data
 def load_manifest_cached(concept: str) -> dict:
     c = _client()
@@ -225,7 +224,6 @@ def predict_with_bundle(concept: str, submodel: str, df_hash: str, df: pd.DataFr
                 out[f"{concept}_prob_class_{i}"] = proba[:, i]
     return out
 
-
 # ──────────────────────────────────────────────
 # Formatting helpers
 # ──────────────────────────────────────────────
@@ -260,6 +258,88 @@ def model_badge(concept: str, df: pd.DataFrame):
     if col in df.columns and df[col].notna().any():
         used = df[col].dropna().unique()
         st.caption(f"🧠 Using: **{concept}** → {', '.join(map(str, used))}")
+
+# Machine learning functions
+def has_model_prediction(df: pd.DataFrame, concept: str) -> bool:
+    return (
+        f"{concept}_pred" in df.columns and df[f"{concept}_pred"].notna().any()
+    )
+
+def predicted_churn_distribution(df: pd.DataFrame) -> pd.DataFrame:
+    if "patient_churn_prob" not in df.columns:
+        return pd.DataFrame(columns=["label", "count"])
+
+    predicted = (df["patient_churn_prob"].dropna().ge(0.5).map({
+        False: "Retained",
+        True: "Churned"
+        })
+    )
+
+    return (
+        predicted.value_counts().reindex(["Retained", "Churned"], fill_value=0).rename_axis("label").reset_index(name="count")
+    )
+
+def predicted_churn_by_group(
+        df: pd.DataFrame,
+        group_column: str
+) -> pd.DataFrame:
+    """Predicted churn distribution by a given group column (e.g., service, age_group)."""
+
+    if "patient_churn_prob" not in df.columns:
+        return pd.DataFrame()
+
+    work = df[[group_column, "patient_churn_prob"]].dropna().copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    work["predicted_churn"] = (work["patient_churn_prob"] >= 0.5).astype(int)
+
+    return (
+        work.groupby(group_column, observed=True)
+        .agg(
+            patients=("predicted_churn", "size"),
+            predicted_churn_rate=("predicted_churn", "mean"),
+        )
+        .reset_index()
+        .sort_values(
+            "predicted_churn_rate", ascending=False
+        )
+    )
+
+def predicted_class_distribution(
+    df: pd.DataFrame,
+    concept: str,
+) -> pd.DataFrame:
+    column = f"{concept}_pred"
+
+    if column not in df.columns:
+        return pd.DataFrame(columns=["label", "count"])
+
+    return (
+        df[column]
+        .dropna()
+        .astype(str)
+        .value_counts()
+        .rename_axis("label")
+        .reset_index(name="count")
+    )
+
+def predicted_regression_by_service(
+    df: pd.DataFrame,
+    concept: str,
+) -> pd.DataFrame:
+    column = f"{concept}_pred"
+
+    if column not in df.columns:
+        return pd.DataFrame()
+
+    return (
+        df[["service", column]]
+        .dropna()
+        .groupby("service", as_index=False)[column]
+        .mean()
+        .sort_values(column, ascending=False)
+    )
 
 def empty_guard(df: pd.DataFrame) -> bool:
     if len(df) == 0:
@@ -816,50 +896,126 @@ def page_churn_analytics():
         )
     st.markdown("---")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        render_section_header("Churn Distribution")
-        cnt = df["patient_churn"].value_counts().reset_index()
-        cnt.columns = ["churn", "n"]
-        cnt["label"] = cnt["churn"].map({0: "Retained", 1: "Churned"})
-        fig = px.pie(cnt, names="label", values="n", hole=0.62,
-                     color="label", color_discrete_map=CHURN_COLORS)
-        fig.update_traces(textinfo="percent+value", textposition="inside")
-        styled_chart(fig, height=300)
-    with c2:
-        render_section_header("Churn by Service")
-        svc = (df.groupby("service")
-               .agg(patients=("patient_id", "count"), churn_rate=("patient_churn", "mean"))
-               .reset_index().sort_values("churn_rate", ascending=False))
-        fig = px.bar(svc, x="service", y="churn_rate", color="service",
-                     color_discrete_map=SERVICE_COLORS, text_auto=".1%")
-        fig.update_traces(textposition="outside")
-        styled_chart(fig, height=300, showlegend=False, yaxis_tickformat=".0%",
-                     xaxis_title="", yaxis_title="Churn rate")
+c1, c2 = st.columns(2)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        render_section_header("Churn by Age Group")
-        ag = (df.groupby("age_group", observed=True)
-              .agg(patients=("patient_id", "count"), churn_rate=("patient_churn", "mean"))
-              .reset_index())
-        fig = px.bar(ag, x=ag["age_group"].astype(str), y="churn_rate", text_auto=".1%",
-                     color_discrete_sequence=["#0F2A44"])
+with c1:
+    render_section_header(
+        "Predicted Churn Distribution",
+        "Model prediction using a probability threshold of 0.5.",
+    )
+
+    churn_distribution = predicted_churn_distribution(df)
+
+    if churn_distribution.empty:
+        st.info("Patient-churn predictions are not available.")
+    else:
+        fig = px.pie(
+            churn_distribution,
+            names="label",
+            values="count",
+            hole=0.62,
+            color="label",
+            color_discrete_map=CHURN_COLORS,
+        )
+        fig.update_traces(
+            textinfo="percent+value",
+            textposition="inside",
+        )
+        styled_chart(fig, height=300)
+
+with c2:
+    render_section_header(
+        "Predicted Churn by Service",
+        "Mean model-predicted churn rate by service.",
+    )
+
+    service_churn = predicted_churn_by_group(
+        df,
+        "service",
+    )
+
+    if service_churn.empty:
+        st.info("Patient-churn predictions are not available.")
+    else:
+        fig = px.bar(
+            service_churn,
+            x="service",
+            y="predicted_churn_rate",
+            color="service",
+            color_discrete_map=SERVICE_COLORS,
+            text_auto=".1%",
+        )
         fig.update_traces(textposition="outside")
-        styled_chart(fig, height=300, yaxis_tickformat=".0%",
-                     xaxis_title="Age group", yaxis_title="Churn rate")
-        st.caption("Sample sizes: " + ", ".join(f"{r['age_group']} n={r['patients']}" for _, r in ag.iterrows()))
-    with c2:
-        render_section_header("Churn by Satisfaction Band")
-        sb = (df.groupby("satisfaction_bin", observed=True)
-              .agg(patients=("patient_id", "count"), churn_rate=("patient_churn", "mean"))
-              .reset_index())
-        fig = px.bar(sb, x=sb["satisfaction_bin"].astype(str), y="churn_rate", text_auto=".1%",
-                     color_discrete_sequence=["#2A9D8F"])
+        styled_chart(
+            fig,
+            height=300,
+            showlegend=False,
+            yaxis_tickformat=".0%",
+            xaxis_title="",
+            yaxis_title="Predicted churn rate",
+        )
+
+c1, c2 = st.columns(2)
+
+with c1:
+    render_section_header(
+        "Predicted Churn by Age Group",
+        "Mean model-predicted churn rate by age group.",
+    )
+
+    age_churn = predicted_churn_by_group(
+        df,
+        "age_group",
+    )
+
+    if age_churn.empty:
+        st.info("Patient-churn predictions are not available.")
+    else:
+        fig = px.bar(
+            age_churn,
+            x=age_churn["age_group"].astype(str),
+            y="predicted_churn_rate",
+            text_auto=".1%",
+            color_discrete_sequence=["#0F2A44"],
+        )
         fig.update_traces(textposition="outside")
-        styled_chart(fig, height=300, yaxis_tickformat=".0%",
-                     xaxis_title="Satisfaction band", yaxis_title="Churn rate")
-        st.caption(", ".join(f"{r['satisfaction_bin']} n={r['patients']}" for _, r in sb.iterrows()))
+        styled_chart(
+            fig,
+            height=300,
+            yaxis_tickformat=".0%",
+            xaxis_title="Age group",
+            yaxis_title="Predicted churn rate",
+        )
+
+with c2:
+    render_section_header(
+        "Predicted Churn by Satisfaction Band",
+        "Mean model-predicted churn rate by satisfaction band.",
+    )
+
+    satisfaction_churn = predicted_churn_by_group(
+        df,
+        "satisfaction_bin",
+    )
+
+    if satisfaction_churn.empty:
+        st.info("Patient-churn predictions are not available.")
+    else:
+        fig = px.bar(
+            satisfaction_churn,
+            x=satisfaction_churn["satisfaction_bin"].astype(str),
+            y="predicted_churn_rate",
+            text_auto=".1%",
+            color_discrete_sequence=["#2A9D8F"],
+        )
+        fig.update_traces(textposition="outside")
+        styled_chart(
+            fig,
+            height=300,
+            yaxis_tickformat=".0%",
+            xaxis_title="Satisfaction band",
+            yaxis_title="Predicted churn rate",
+        )
 
     c1, c2 = st.columns(2)
     with c1:
@@ -924,29 +1080,33 @@ def page_hospital_operations():
     if empty_guard(df):
         return
 
-    # ── NEW: manual risk-score prediction
-    render_section_header("Manual Risk-Score Prediction",
-                          "Predict the risk score for a hypothetical record.")
-    if "risk_score" in choices:
-        predict_ui.prediction_form(
-            concept="risk_score",
-            submodel=choices["risk_score"],
-            defaults={
-                "age": 50, "satisfaction": 65, "length_of_stay": 6,
-                "available_beds": 18, "patients_request": 45,
-                "patients_admitted": 32, "patients_refused": 13,
-                "staff_morale": 68, "staff_present": 24,
-                "total_staff": 30, "staff_absent": 6,
-                "capacity_pressure": 45 / 19,
-                "admission_rate_row": 32 / 45,
-                "refusal_rate_row": 13 / 45,
-                "staff_attendance_rate": 24 / 30,
-                "service": "ICU",
-            },
-            form_key="form_risk_score_ops",
-            services=sorted(df_raw["service"].dropna().unique().tolist()),
-        )
+    render_section_header(
+    "Predicted Risk Score by Service",
+    "Mean risk score predicted by the regression model.",
+    )
 
+    risk_by_service = predicted_regression_by_service(df,"risk_score")
+
+    if risk_by_service.empty:
+        st.info("Risk-score predictions are not available.")
+    else:
+        fig = px.bar(
+            risk_by_service,
+            x="service",
+            y="risk_score_pred",
+            color="service",
+            color_discrete_map=SERVICE_COLORS,
+            text_auto=".2f",
+        )
+    fig.update_traces(textposition="outside")
+    styled_chart(
+        fig,
+        height=300,
+        showlegend=False,
+        xaxis_title="",
+        yaxis_title="Predicted risk score",
+    )
+    
     render_section_header("Model-Predicted Risk Score by Service")
     model_badge("risk_score", df)
     charts.service_prediction_bar(df, "risk_score", SERVICE_COLORS)
@@ -1168,7 +1328,6 @@ def page_staff_analytics():
         render_insight(f"Staff morale and patient satisfaction show a "
                        f"{'positive' if corr_ms > 0 else 'negative'} association (r={corr_ms:.2f}).")
 
-
 def page_service_performance():
     st.markdown("# Service Performance")
     st.markdown('<div class="section-desc">Comparative performance with a transparent Service Health Score.</div>',
@@ -1200,7 +1359,7 @@ def page_service_performance():
         )
 
     render_section_header("Model-Predicted Service Health")
-    model_badge("service_performance", df)
+    model_badge("service_performance", df)  
     charts.service_prediction_bar(df, "service_performance", SERVICE_COLORS)
 
     tbl = (df.groupby("service")
@@ -1286,7 +1445,6 @@ def page_service_performance():
     if churn_gap >= 0.05:
         render_insight(f"Churn varies {churn_gap:.1%} across services — service-level intervention is warranted.")
 
-
 def page_operational_risk():
     st.markdown("# Operational Risk Monitoring")
     st.markdown('<div class="section-desc">Heuristic risk and capacity pressure monitoring.</div>',
@@ -1296,29 +1454,38 @@ def page_operational_risk():
     if empty_guard(df):
         return
 
-    # ── NEW: manual risk-level prediction
-    render_section_header("Manual Operational-Risk Prediction",
-                          "Enter metrics and predict the risk class.")
-    if "risk_level" in choices:
-        predict_ui.prediction_form(
-            concept="risk_level",
-            submodel=choices["risk_level"],
-            defaults={
-                "age": 50, "satisfaction": 55, "length_of_stay": 8,
-                "available_beds": 10, "patients_request": 55,
-                "patients_admitted": 35, "patients_refused": 20,
-                "staff_morale": 55, "staff_present": 18,
-                "total_staff": 30, "staff_absent": 12,
-                "capacity_pressure": 55 / 11,
-                "admission_rate_row": 35 / 55,
-                "refusal_rate_row": 20 / 55,
-                "staff_attendance_rate": 18 / 30,
-                "service": "emergency",
-            },
-            form_key="form_risk_ops",
-            services=sorted(df_raw["service"].dropna().unique().tolist()),
+    render_section_header(
+    "Predicted Risk-Level Distribution",
+    "Distribution produced by the trained risk-level classifier.",
+    )
+
+    # Risk distribution chart by predicted risk level
+    risk_distribution = predicted_class_distribution(df,"risk_level",)
+
+    if risk_distribution.empty:
+        st.info("Risk-level predictions are not available.")
+    else:
+        risk_distribution["label"] = (
+            risk_distribution["label"]
+            .str.title()
         )
-    st.markdown("---")
+
+        fig = px.bar(
+            risk_distribution,
+            x="label",
+            y="count",
+            color="label",
+            color_discrete_map=RISK_COLORS,
+            text="count",
+        )
+        fig.update_traces(textposition="outside")
+        styled_chart(
+            fig,
+            height=300,
+            showlegend=False,
+            xaxis_title="Predicted risk level",
+            yaxis_title="Patients",
+        )
 
     cols = st.columns(4)
     with cols[0]: render_kpi("Avg Risk Score", fmt_float(df["risk_score"].mean(), 1) + " /100")
@@ -1355,7 +1522,7 @@ def page_operational_risk():
         fig.update_traces(textposition="outside")
         styled_chart(fig, height=300, showlegend=False, xaxis_title="Risk level", yaxis_title="Patients")
     with c2:
-        render_section_header("Risk by Service")
+        render_section_header("Riskvice")
         rs = (df.groupby("service")["risk_score"].mean().reset_index()
               .sort_values("risk_score", ascending=False))
         fig = px.bar(rs, x="service", y="risk_score", color="service",

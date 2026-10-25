@@ -13,6 +13,8 @@ from app.api.config import settings
 from app.ml.pg_store import query
 from app.ml.registry import load_concept
 from app.ml.multimodel import pick_best
+from app.ml.minio_store import _client
+from minio.error import S3Error
 
 # Define logging
 logging.basicConfig(level=logging.INFO)
@@ -52,22 +54,25 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Feast FeatureStore initialized successfully.")
 
         update_model_accuracy_metrics()
-        logger.info("Model accuracy metrics updated.")
+        logger.info("✅ Model accuracy metrics updated.")
+
     except Exception as e:
         logger.error(f"❌ Failed to initialize Feast FeatureStore: {e}")
         logger.exception("Failed to update model accuracy metrics.")
 
     # 2. Warm load ML models bundles from MinIO
-    try:
-        for concept in ["churn", "risk_score", "service_performance"]:
-            try:
-                get_model_bundle(concept)
-                logger.info(f"✅ Model bundle for '{concept}' loaded successfully.")
-            except Exception as e:
-                logger.warning(f"⚠️ Warm-up failed for model bundle '{concept}': {e}")
+    for concept in ["patient_churn", "risk_score", "service_performance"]:
+        try:
+            bundle = get_model_bundle(concept)
 
-    except Exception as e:
-        logger.error(f"❌ Failed to warm up ML models: {e}")
+            if bundle is None:
+                logger.warning(f"⚠️ Model bundle for '{concept}' is not loaded.")
+                continue
+
+            logger.info(f"✅ Model bundle for '{concept}' loaded successfully.")
+
+        except Exception as e:
+            logger.exception(f"❌ Warm-up is Failed to load model bundle for '{concept}': {e}")
 
     yield
     logger.info("🛑 API shutting down")
@@ -110,9 +115,95 @@ def health_check():
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+# Get the list models loaded by MinIO Store
+MODEL_NAME_ALIASES = {
+    "churn": "patient_churn",
+    "patient_churn": "patient_churn",
+    "risk": "risk_level",
+    "risk_level": "risk_level",
+    "risk_score": "risk_score",
+    "integrity": "integrity_audit",
+    "integrity_audit": "integrity_audit",
+    "service": "service_performance",
+    "service_performance": "service_performance",
+    "staff_attendance_rate": "staff_staff_attendance_rate",
+    "staff_morale": "staff_staff_morale",
+}
 @app.get("/model/{name}/health")
 def model_health(name: str):
-    return {"model": name, "loaded": bool(MODEL_LOADED.labels(model_name=name)._value.get())}
+    """Check whether a model bundle exist"""
+    requested_names = name.lower()
+    stored_name = MODEL_NAME_ALIASES.get(requested_names, requested_names)
+
+    try:
+        bundle = get_model_bundle(stored_name)
+        loaded = bundle is not None
+
+    except Exception as e:
+        logger.error(f"❌ Error checking model health for '{stored_name}': {e}")
+        loaded = False
+
+    # Labels for Prometheus metrics
+    MODEL_LOADED.labels(model_name=stored_name).set(1 if loaded else 0)
+
+    return {
+        "model": requested_names,
+        "stored_name": stored_name,
+        "loaded": loaded,
+        "object": f"models/{stored_name}_bundle.joblib"
+    }
+
+@app.get("/model")
+def list_models():
+    """Endpoint to list all loaded models."""
+    client = _client()
+    bucket = settings.MINIO_BUCKET
+    loaded_models= []
+
+    try:
+        objects = client.list_objects(bucket, prefix="models/", recursive=True)
+
+        # Loop though the objects and filter for model bundles
+        for obj in objects:
+            object_name = obj.object_name
+
+            if not object_name.endswith("_bundle.joblib"):
+                continue  # Skip non-model bundle files
+
+            filename = object_name.removeprefix("models/")
+            model_name = filename.removesuffix("_bundle.joblib")
+
+            try:
+                bundle = get_model_bundle(model_name)
+                loaded = bundle is not None
+            except Exception as e:
+                logger.error(f"❌ Error checking model health for '{model_name}': {e}")
+                loaded = False
+
+            MODEL_LOADED.labels(model_name=model_name).set(1 if loaded else 0)
+
+            # Append models loaded
+            loaded_models.append({
+                "model": model_name,
+                "loaded": loaded,
+                "object": object_name,
+                "size_bytes": obj.size,
+                "last_modified": obj.last_modified.isoformat()
+            })            
+
+    except S3Error:
+        logger.exception(
+            "Failed to list model bundles from MinIO bucket '%s'.",
+            bucket,
+        )
+        raise
+
+    return {
+        "bucket": bucket,
+        "count": len(loaded_models),
+        "models": loaded_models
+    }
+
 
 # Set the business KPI
 @app.get("/business-kpi")

@@ -22,6 +22,7 @@ REQUIRED_SOURCE_COLUMNS = {
     "admission_rate_row",
     "refusal_rate_row",
     "staff_attendance_rate",
+    "risk_score"
 }
 
 def quote_identifier(identifier: str) -> str:
@@ -71,6 +72,7 @@ def load_source_data() -> pd.DataFrame:
             "admission_rate_row",
             "refusal_rate_row",
             "staff_attendance_rate",
+            "risk_score"
         ]
     ].copy()
 
@@ -91,6 +93,7 @@ def load_source_data() -> pd.DataFrame:
         "admission_rate_row",
         "refusal_rate_row",
         "staff_attendance_rate",
+        "risk_score"
     ]
 
     for column in numeric_columns:
@@ -114,6 +117,7 @@ def add_columns_if_missing(connection) -> None:
                 ADD COLUMN IF NOT EXISTS capacity_pressure DOUBLE PRECISION,
                 ADD COLUMN IF NOT EXISTS admission_rate_row DOUBLE PRECISION,
                 ADD COLUMN IF NOT EXISTS refusal_rate_row DOUBLE PRECISION,
+                ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION,
                 ADD COLUMN IF NOT EXISTS staff_attendance_rate DOUBLE PRECISION
             """
         )
@@ -150,6 +154,7 @@ def update_existing_rows(
             "admission_rate_row": Float(),
             "refusal_rate_row": Float(),
             "staff_attendance_rate": Float(),
+            "risk_score": Float(),
         },
     )
 
@@ -161,7 +166,8 @@ def update_existing_rows(
                 capacity_pressure = source.capacity_pressure,
                 admission_rate_row = source.admission_rate_row,
                 refusal_rate_row = source.refusal_rate_row,
-                staff_attendance_rate = source.staff_attendance_rate
+                staff_attendance_rate = source.staff_attendance_rate,
+                risk_score = source.risk_score
             FROM {quote_identifier(staging_table)} AS source
             WHERE target.patient_id = source.patient_id
             """

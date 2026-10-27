@@ -1,4 +1,4 @@
-from typing import List, Dict, Literal, Optional
+from typing import List, Dict, Literal, Optional, Any
 from pydantic import BaseModel, Field
 
 class LLMMessages(BaseModel):
@@ -14,10 +14,31 @@ class HospitalDataRequest(BaseModel):
     service: Literal["emergency", "surgery", "general_medicine", "ICU"]
     name: Optional[str] = Field(None, description="Patient's name.")
 
-class PredictionResponse(BaseModel):
+class PredictionRequest(BaseModel):
+    patient_ids: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=10_000,
+        description="Patient IDs used for database-backed prediction.",
+    )
+    submodel: Optional[str] = Field(
+        default=None,
+        description="Optional model submodel. The API selects the best model when omitted.",
+    )
+
+class PredictionItem(BaseModel):
+    patient_id: str
+    prediction: Any
+    probability: Optional[float] = None
+    probabilities: Optional[List[float]] = None
     model_user: str
-    prediction: int
-    probability: List[float]
+    submodel: str
+
+class PredictionResponse(BaseModel):
+    concept: str
+    task: str
+    count: int
+    predictions: List[PredictionItem]
 
 class LLMResponse(BaseModel):
     text: str

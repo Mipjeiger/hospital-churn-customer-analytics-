@@ -50,6 +50,7 @@ services:
       PROMETHEUS_EXPORTER_PORT: 8001
       ENABLE_PROMETHEUS_EXPORTER: "true"
       PREFECT_API_URL: http://prefect:4200/api
+      FRONTEND_ORIGIN: http://localhost:8085
       # Langfuse configuration
       LANGFUSE_HOST: http://langfuse:3000
       LANGFUSE_BASE_URL: http://langfuse:3000
@@ -197,6 +198,11 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     networks:
       - hospital_network
 
@@ -214,8 +220,8 @@ services:
       - ./app/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./app/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
-      - prometheus
       - pushgateway
+      - prometheus
     networks:
       - hospital_network
 
@@ -252,9 +258,11 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: http://fastapi:8000
     container_name: frontend
     ports:
-      - "80:80"
+      - "8085:8085"
     networks:
       - hospital_network
     depends_on:

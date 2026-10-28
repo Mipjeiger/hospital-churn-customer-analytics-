@@ -1,20 +1,32 @@
+##
+## Stage 1: Build
+##
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Copy only package files first for caching
+# Install dependencies using lockfile for reproducibility
 COPY app/frontend/package.json app/frontend/package-lock.json ./
 RUN npm ci
 
-# Copy source code
+# Copy all source files
 COPY app/frontend/ ./
 
-# Build the frontend
+# Build environment — API URL points to internal service name inside Docker network
+ARG VITE_API_BASE_URL=http://fastapi:8000
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
 RUN npm run build
 
-# Production stage - use nginx to serve static files
+##
+## Stage 2: Serve with nginx
+##
 FROM nginx:stable-alpine AS production
+
+# Custom nginx config for React Router (SPA fallback to index.html)
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy built assets
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Expose Port
-EXPOSE 80
+EXPOSE 8085
 CMD ["nginx", "-g", "daemon off;"]

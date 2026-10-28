@@ -28,28 +28,38 @@ services:
       - 182.12.0.5
     env_file: .env
     environment:
+      # PostgreSQL configuration
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      # LLM API keys
       HUGGINGFACE_API_KEY: ${HUGGINGFACE_API_KEY}
       GROQ_API_KEY: ${GROQ_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       NINEROUTER_API_KEY: ${NINEROUTER_API_KEY}
+      # Feast configuration
       FEAST_REPO_PATH: /app/app/feast
+      # MinIO & MLflow configuration
       MINIO_ENDPOINT: minio:9000
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      PROMETHEUS_EXPORTER_PORT: 9090
+      PROMETHEUS_EXPORTER_PORT: 8001
       ENABLE_PROMETHEUS_EXPORTER: "true"
       PREFECT_API_URL: http://prefect:4200/api
+      # Langfuse configuration
+      LANGFUSE_HOST: http://langfuse:3000
+      LANGFUSE_BASE_URL: http://langfuse:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://langfuse:3000/api/public/otel
     ports:
       - "8000:8000" # Expose FastAPI endpoint
-      - "8002:8002"  # Expose Prefect metrics endpoint
-      - "9090:9090"  # Expose Prometheus metrics endpoint
+    expose:
+      - "8001"
     volumes:
       - .:/app
       - .:/app/feast:/app/app/feast
@@ -58,6 +68,7 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - postgres
+      - mlflow
     networks:
       - hospital_network
 
@@ -205,6 +216,35 @@ services:
     depends_on:
       - prometheus
       - pushgateway
+    networks:
+      - hospital_network
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.streamlit
+    container_name: streamlit
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_SCHEMA: ${POSTGRES_SCHEMA}
+      POSTGRES_TABLE: ${POSTGRES_TABLE}
+      API_BASE_URL: http://fastapi:8000
+    ports:
+      - "8501:8501"
+      - "8502:8502"
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - fastapi
     networks:
       - hospital_network
 

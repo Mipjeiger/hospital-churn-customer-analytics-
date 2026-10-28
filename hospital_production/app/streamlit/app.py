@@ -19,11 +19,11 @@ sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != STREAMLIT_DIR]
 
 from app.api.config import settings
 from app.streamlit.metrics import start_metrics_server, update_dashboard_metrics
-from app.ml.registry import load_concept
 from app.ml.minio_store import _client
 
 # ── NEW: import the two new UI modules
 from app.streamlit import predict_ui, charts
+from app.streamlit.api_client import PredictionAPIError, predict_from_api
 
 # ──────────────────────────────────────────────
 # Constants
@@ -176,9 +176,6 @@ def load_data() -> pd.DataFrame:
 # ──────────────────────────────────────────────
 # Model loading & prediction
 # ──────────────────────────────────────────────
-@st.cache_resource
-def load_bundle_cached(concept: str):
-    return load_concept(concept)
 
 @st.cache_data
 def load_manifest_cached(concept: str) -> dict:
@@ -189,40 +186,6 @@ def load_manifest_cached(concept: str) -> dict:
     finally:
         r.close()
         r.release_conn()
-
-
-@st.cache_data(show_spinner=False)
-def predict_with_bundle(concept: str, submodel: str, df_hash: str, df: pd.DataFrame) -> pd.DataFrame:
-    bundle = load_bundle_cached(concept)
-    entry = bundle["models"][submodel]
-    features = bundle["features"]
-
-    missing = [f for f in features if f not in df.columns]
-    if missing:
-        raise ValueError(f"Missing features for {concept}: {missing}")
-
-    X = df[features]
-    preds = entry["pipeline"].predict(X)
-
-    le = entry.get("label_encoder")
-    if le is not None:
-        try:
-            preds = le.inverse_transform(preds)
-        except Exception:
-            pass
-
-    out = df[["patient_id"]].copy()
-    out[f"{concept}_pred"] = preds
-    out[f"{concept}_submodel"] = submodel
-
-    if hasattr(entry["pipeline"], "predict_proba"):
-        proba = entry["pipeline"].predict_proba(X)
-        if proba.ndim == 2 and proba.shape[1] == 2:
-            out[f"{concept}_prob"] = proba[:, 1]
-        elif proba.ndim == 2 and proba.shape[1] > 2:
-            for i in range(proba.shape[1]):
-                out[f"{concept}_prob_class_{i}"] = proba[:, i]
-    return out
 
 
 # ──────────────────────────────────────────────
@@ -310,45 +273,128 @@ def build_model_selection(manifests: dict[str, dict]) -> dict[str, str]:
             choices[concept] = labels[pick]
     return choices
 
-def attach_predictions(df: pd.DataFrame, choices: dict[str, str]) -> tuple[pd.DataFrame, dict[str, str]]:
-    errors = {}
-    frames = []
-    for concept, submodel in choices.items():
-        try:
-            h = f"{concept}_{submodel}_{len(df)}"
-            frames.append(predict_with_bundle(concept, submodel, h, df))
-        except Exception as e:
-            errors[concept] = str(e)
-    for pf in frames:
-        df = df.merge(pf, on="patient_id", how="left")
-    return df, errors
-
-def attach_router_prediction(concept: str, submodel: str, source_df: pd.DataFrame) -> pd.DataFrame | None:
-    """Run a selected model against the database rows after Predict is clicked."""
-    try:
-        prediction_key = f"{concept}_{submodel}_{len(source_df)}"
-        prediction_df = predict_with_bundle(
-            concept=concept,
-            submodel=submodel,
-            df_hash=prediction_key,
-            df=source_df
-        )
-
-        return source_df.merge(
-            prediction_df,
-            on="patient_id",
-            how="left",
-        )
-
-    except Exception as e:
-        st.error(f"Prediction failed for {concept} with submodel {submodel}: {e}")
-        return source_df
-
+# =═══════════════════════════════════════
+# Prediction helpers
+# =═══════════════════════════════════════
 def render_prediction_required_message(concept: str) -> None:
     st.info(
         f"Click **Predict** to calculate the `{concept}` model results for the database records and display the graph. "
         "If you have already submitted a form, the chart will update accordingly."
     )
+
+def fetch_api_predictions(concept: str, source_df: pd.DataFrame, submodel: str | None = None) -> pd.DataFrame | None:
+    """Fetch predictions from the FastAPI prediction service for the given concept and patient IDs."""
+    if "patient_id" not in source_df.columns:
+        st.error("The database data does not contain patient_id.")
+        return None
+
+    patient_ids = source_df["patient_id"].dropna().astype(str).drop_duplicates().tolist()
+
+    if not patient_ids:
+        st.info("No patient IDs are available for prediction.")
+        return None
+
+    try:
+        response = predict_from_api(concept=concept, patient_ids=patient_ids, submodel=submodel)
+    except PredictionAPIError as e:
+        st.error(str(e))
+        return None
+
+    # Prediction rows returned from the API
+    prediction_rows = response.get("predictions", [])
+
+    if not prediction_rows:
+        st.info(f"No predictions were returned for concept '{concept}'.")
+        return None
+
+    prediction_df = pd.DataFrame(prediction_rows)
+
+    if not {"patient_id", "prediction"}.issubset(prediction_df.columns):
+        st.error(
+            "The prediction response must contain patient_id and prediction."
+        )
+        return None
+
+    if prediction_df["patient_id"].duplicated().any():
+        st.error("The prediction response contains duplicate patient IDs.")
+        return None
+
+    prediction_df = prediction_df.rename(
+        columns={
+            "prediction": f"{concept}_pred",
+            "probability": f"{concept}_prob",
+            "probabilities": f"{concept}_probabilities",
+            "model_user": f"{concept}_model",
+            "submodel": f"{concept}_submodel",
+        }
+    )
+
+    prediction_columns = [
+        "patient_id",
+        f"{concept}_pred",
+        f"{concept}_prob",
+        f"{concept}_probabilities",
+        f"{concept}_model",
+        f"{concept}_submodel",
+    ]
+    prediction_columns = [column for column in prediction_columns if column in prediction_df.columns]
+
+    return source_df.merge(
+        prediction_df[prediction_columns],
+        on="patient_id",
+        how="left",
+        validate="one_to_one"  # Ensure each patient_id has at most one prediction
+    )
+
+def store_prediction_result(
+    concept: str,
+    prediction_df: pd.DataFrame
+) -> None:
+    st.session_state[f"prediction_{concept}"] = prediction_df.copy()
+
+def get_prediction_result(concept: str) -> pd.DataFrame | None:
+    result = st.session_state.get(f"prediction_{concept}")
+
+    if isinstance(result, pd.DataFrame):
+        return result
+
+    return None
+
+
+def get_prediction_coverage_frame(
+    concepts: list[str],
+) -> pd.DataFrame | None:
+    coverage_df: pd.DataFrame | None = None
+
+    for concept in concepts:
+        prediction_df = get_prediction_result(concept)
+
+        if prediction_df is None or "patient_id" not in prediction_df.columns:
+            continue
+
+        prediction_columns = [
+            column
+            for column in prediction_df.columns
+            if column.startswith(f"{concept}_")
+        ]
+
+        if not prediction_columns:
+            continue
+
+        current_df = prediction_df[
+            ["patient_id", *prediction_columns]
+        ].copy()
+
+        if coverage_df is None:
+            coverage_df = current_df
+        else:
+            coverage_df = coverage_df.merge(
+                current_df,
+                on="patient_id",
+                how="outer",
+            )
+
+    return coverage_df
 
 # ──────────────────────────────────────────────
 # Load data & build sidebar
@@ -662,16 +708,21 @@ def page_patient_analytics():
     if patient_prediction is None:
         render_prediction_required_message("patient_churn")
     else:
-        patient_prediction_df = attach_router_prediction(
+        patient_prediction_df = fetch_api_predictions(
             concept="patient_churn",
-            submodel=choices["patient_churn"],
-            source_df=df
+            source_df=df,
+            submodel=choices.get("patient_churn")
         )
 
         if patient_prediction_df is not None:
+            store_prediction_result(
+                "patient_churn",
+                patient_prediction_df,
+            )
+
             render_section_header(
                 "Database Churn Predictions",
-                "The graph is based on patient records loaded from PostgreSQL.",
+                "The graph is based on predictions returned by FastAPI.",
             )
 
             model_badge(
@@ -692,13 +743,6 @@ def page_patient_analytics():
                     patient_prediction_df,
                 )
 
-    render_section_header("Bulk Predictions on Filtered Data")
-    model_badge("patient_churn", df)
-    c1, c2 = st.columns(2)
-    with c1:
-        charts.churn_distribution(df, CHURN_COLORS)
-    with c2:
-        charts.churn_confusion(df)
     m = manifests.get("patient_churn")
     if m and "patient_churn_submodel" in df.columns and df["patient_churn_submodel"].notna().any():
         used = df["patient_churn_submodel"].dropna().iloc[0]
@@ -765,13 +809,18 @@ def page_patient_management():
     if risk_prediction is None:
         render_prediction_required_message("risk_level")
     else:
-        risk_prediction_df = attach_router_prediction(
+        risk_prediction_df = fetch_api_predictions(
             concept="risk_level",
-            submodel=choices["risk_level"],
             source_df=df,
+            submodel=choices.get("risk_level")
         )
 
         if risk_prediction_df is not None:
+            store_prediction_result(
+                "risk_level",
+                risk_prediction_df,
+            )
+
             st.subheader("Database Risk-Level Predictions")
 
             risk_counts = (
@@ -942,13 +991,18 @@ def page_churn_analytics():
     if churn_prediction is None:
         render_prediction_required_message("patient_churn")
     else:
-        churn_prediction_df = attach_router_prediction(
+        churn_prediction_df = fetch_api_predictions(
             concept="patient_churn",
-            submodel=choices["patient_churn"],
             source_df=df,
+            submodel=choices.get("patient_churn")
         )
 
         if churn_prediction_df is not None:
+            store_prediction_result(
+                "patient_churn",
+                churn_prediction_df,
+            )
+
             c1, c2 = st.columns(2)
 
             with c1:
@@ -1054,16 +1108,6 @@ def page_churn_analytics():
                                         showarrow=False, font=dict(size=10, color="black" if v < 0.6 else "white")))
     styled_chart(fig, height=360, annotations=annotations, xaxis_title="Age group", yaxis_title="Service")
 
-    # ── NEW: bulk model predictions at the bottom
-    render_section_header("Bulk Predictions — Model vs Observed")
-    model_badge("patient_churn", df)
-    c1, c2 = st.columns(2)
-    with c1:
-        charts.churn_distribution(df, CHURN_COLORS)
-    with c2:
-        charts.churn_confusion(df)
-
-
 def page_hospital_operations():
     st.markdown("# Hospital Operations")
     st.markdown('<div class="section-desc">Demand, admissions, refusals, and capacity pressure.</div>',
@@ -1116,22 +1160,19 @@ def page_hospital_operations():
     if risk_score_prediction is None:
         render_prediction_required_message("risk_score")
     else:
-        risk_score_df = attach_router_prediction(
+        risk_score_prediction_df = fetch_api_predictions(
             concept="risk_score",
-            submodel=choices["risk_score"],
             source_df=df,
+            submodel=choices.get("risk_score"),
         )
 
-        if risk_score_df is not None:
-            render_section_header(
-                "Predicted Risk Score by Service",
-                "Model result calculated from the filtered database records.",
+        if risk_score_prediction_df is not None:
+            store_prediction_result(
+                "risk_score",
+                risk_score_prediction_df,
             )
-
-            model_badge("risk_score", risk_score_df)
-
             charts.service_prediction_bar(
-                risk_score_df,
+                risk_score_prediction_df,
                 "risk_score",
                 SERVICE_COLORS,
             )
@@ -1278,23 +1319,27 @@ def page_staff_analytics():
         if morale_prediction is None:
             render_prediction_required_message("staff_staff_morale")
         else:
-            inp = morale_prediction.get("_input", {})
-            service_val = inp.get("service", "unknown")
-            pred_val = morale_prediction.get("prediction")
-
-            # Build an updated DataFrame by inserting the single prediction into the full dataset
-            updated_df = df.copy()
-            pred_col = "staff_staff_morale_pred"
-            if pred_col not in updated_df.columns:
-                updated_df[pred_col] = pd.NA
-            mask = updated_df["service"] == service_val
-            updated_df.loc[mask, pred_col] = pred_val
-            model_badge("staff_staff_morale", pd.DataFrame(updated_df))
-            charts.service_prediction_bar(
-                pd.DataFrame(updated_df),
-                "staff_staff_morale",
-                SERVICE_COLORS,
+            morale_prediction_df = fetch_api_predictions(
+                concept="staff_staff_morale",
+                source_df=df,
+                submodel=choices.get("staff_staff_morale")
             )
+
+            if morale_prediction_df is not None:
+                store_prediction_result(
+                    "staff_staff_morale",
+                    pd.DataFrame(morale_prediction_df),
+                )
+
+                model_badge(
+                    "staff_staff_morale",
+                    morale_prediction_df,
+                )
+                charts.service_prediction_bar(
+                    morale_prediction_df,
+                    "staff_staff_morale",
+                    SERVICE_COLORS,
+                )
 
     with c2:
         attendance_prediction = None
@@ -1325,25 +1370,28 @@ def page_staff_analytics():
                 services=sorted(df_raw["service"].dropna().unique().tolist()),
             )
 
-        # Build an updated DataFrame by inserting the single attendance prediction into the full dataset
-        if attendance_prediction is not None:
-            inp = attendance_prediction.get("_input", {})
-            service_val = inp.get("service", "unknown")
-            pred_val = attendance_prediction.get("prediction")
-            updated_att_df = df.copy()
-            pred_col = "staff_staff_attendance_rate_pred"
-            if pred_col not in updated_att_df.columns:
-                updated_att_df[pred_col] = pd.NA
-            mask = updated_att_df["service"] == service_val
-            updated_att_df.loc[mask, pred_col] = pred_val
-            model_badge("staff_staff_attendance_rate", pd.DataFrame(updated_att_df))
-            charts.service_prediction_bar(
-                pd.DataFrame(updated_att_df),
-                "staff_staff_attendance_rate",
-                SERVICE_COLORS,
-            )
-        else:
+        if attendance_prediction is None:
             render_prediction_required_message("staff_staff_attendance_rate")
+        else:
+            attendance_prediction_df = fetch_api_predictions(
+                concept="staff_staff_attendance_rate",
+                source_df=df,
+                submodel=choices.get("staff_staff_attendance_rate")
+            )
+
+            if attendance_prediction_df is not None:
+                store_prediction_result(
+                    "staff_staff_attendance_rate",
+                    attendance_prediction_df,
+                )
+
+                model_badge("staff_staff_attendance_rate", attendance_prediction_df)
+
+                charts.service_prediction_bar(
+                    attendance_prediction_df,
+                    "staff_staff_attendance_rate",
+                    SERVICE_COLORS
+                )
     
     render_section_header("Bulk Predictions — Observed vs Predicted")
     model_badge("staff_staff_morale", df)
@@ -1460,14 +1508,14 @@ def page_service_performance():
     if service_prediction is None:
         render_prediction_required_message("service_performance")
     else:
-        service_prediction_df = attach_router_prediction(
+        service_prediction_df = fetch_api_predictions(
             concept="service_performance",
-            submodel=choices["service_performance"],
             source_df=df,
+            submodel=choices.get("service_performance")
         )
 
         if service_prediction_df is not None:
-            model_badge(
+            store_prediction_result(
                 "service_performance",
                 service_prediction_df,
             )
@@ -1610,13 +1658,18 @@ def page_operational_risk():
     if risk_level_prediction is None:
         render_prediction_required_message("risk_level")
     else:
-        risk_level_df = attach_router_prediction(
+        risk_level_df = fetch_api_predictions(
             concept="risk_level",
-            submodel=choices["risk_level"],
             source_df=df,
+            submodel=choices.get("risk_level")
         )
 
         if risk_level_df is not None:
+            store_prediction_result(
+                "risk_level",
+                risk_level_df,
+            )
+
             render_section_header(
                 "Predicted Risk-Level Distribution",
                 "Model result calculated from the filtered database records.",
@@ -1765,9 +1818,23 @@ def page_model_performance():
                 st.markdown("**Features used**")
                 st.code("\n".join(m["features"]), language="text")
 
-    # ── NEW: use charts.prediction_coverage_table
-    render_section_header("Prediction Coverage")
-    charts.prediction_coverage_table(df, MODEL_CONCEPTS)
+    render_section_header(
+        "Prediction Coverage",
+        "Coverage is based on predictions requested from FastAPI.",
+    )
+
+    coverage_df = get_prediction_coverage_frame(MODEL_CONCEPTS)
+
+    if coverage_df is None:
+        st.info(
+            "No API predictions are available yet. "
+            "Open a prediction page and click Predict first."
+        )
+    else:
+        charts.prediction_coverage_table(
+            coverage_df,
+            MODEL_CONCEPTS,
+        )
 
 def page_management_insights():
     st.markdown("# Management Insights")
@@ -1822,14 +1889,41 @@ def page_management_insights():
     if hr > 0.15:
         insights.append(("Risk Concentration", f"{hr:.1%} are High operational risk."))
 
-    if "patient_churn_prob" in df.columns:
-        high_pool = df[df["patient_churn_prob"] > 0.7]
-        if len(high_pool) > 0:
-            used = df["patient_churn_submodel"].dropna().iloc[0]
-            insights.append(("Model Signal",
-                             f"{len(high_pool)} patients ({len(high_pool)/len(df):.1%}) "
-                             f"have predicted churn probability > 0.7 using **{used}**. "
-                             f"Prioritise for outreach — predicted, not confirmed."))
+    churn_prediction_df = get_prediction_result("patient_churn")
+
+    if (
+        churn_prediction_df is not None
+        and "patient_churn_prob" in churn_prediction_df.columns
+    ):
+        churn_work = churn_prediction_df[
+            churn_prediction_df["patient_churn_prob"].notna()
+        ]
+        high_pool = churn_work[
+            churn_work["patient_churn_prob"] > 0.7
+        ]
+
+        if not high_pool.empty:
+            model_column = "patient_churn_submodel"
+            if (
+                model_column in high_pool.columns
+                and high_pool[model_column].notna().any()
+            ):
+                used_model = str(
+                    high_pool[model_column].dropna().iloc[0]
+                )
+            else:
+                used_model = "selected model"
+
+            insights.append(
+                (
+                    "Model Signal",
+                    f"{len(high_pool)} patients "
+                    f"({len(high_pool) / len(churn_work):.1%}) "
+                    f"have predicted churn probability above 0.7 "
+                    f"using **{used_model}**. "
+                    "Prioritise for outreach — predicted, not confirmed.",
+                )
+            )
 
     if not insights:
         render_insight("No meaningful differences detected in the current filtered data. "

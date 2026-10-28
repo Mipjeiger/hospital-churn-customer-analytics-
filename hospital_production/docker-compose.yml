@@ -248,6 +248,18 @@ services:
     networks:
       - hospital_network
 
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: frontend
+    ports:
+      - "80:80"
+    networks:
+      - hospital_network
+    depends_on:
+      - fastapi
+
 volumes:
   pgdata:
   minio_data:

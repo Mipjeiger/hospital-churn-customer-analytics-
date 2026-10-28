@@ -11,3 +11,4 @@ secrets/
 hospital_production/app/feast/feature_store.yaml
 hospital_production/docker/resolv.conf
 hospital_production/app/frontend/node_modules
+hospital_production/app/frontend/hospital_production/app/frontend/node_modules

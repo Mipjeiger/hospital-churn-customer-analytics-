@@ -36,7 +36,7 @@ CAPACITY_COLORS = {"Low": "#0E7C7B", "Moderate": "#E6A817", "High": "#E67E22", "
 CHURN_COLORS = {"Retained": "#0E7C7B", "Churned": "#D64545"}
 AGE_ORDER = ["0–12", "13–18", "19–30", "31–45", "46–60", "61+"]
 SATISFACTION_ORDER = ["0–20", "21–40", "41–60", "61–80", "81–100"]
-RISK_ORDER = ["Low", "Medium", "High"]
+RISK_ORDER = ["Low", "Medium", "High", "Critical"]
 CAPACITY_ORDER = ["Low", "Moderate", "High", "Critical"]
 
 MODEL_CONCEPTS = [
@@ -278,17 +278,22 @@ def fetch_api_predictions(concept: str, source_df: pd.DataFrame, submodel: str |
         return None
 
     # Prediction rows returned from the API
-    prediction_rows = response.get("predictions", [])
+    prediction_rows = response.get("predictions")
 
-    if not prediction_rows:
-        st.info(f"No predictions were returned for concept '{concept}'.")
+    if not isinstance(prediction_rows, list) or not prediction_rows:
+        st.warning(f"FastAPI returned no predictions for concept '{concept}'.")
         return None
 
     prediction_df = pd.DataFrame(prediction_rows)
 
-    if not {"patient_id", "prediction"}.issubset(prediction_df.columns):
+    # columns requirements to interact API and dashboard
+    required_columns = {"patient_id", "prediction"}
+    missing_columns = required_columns.difference(prediction_df.columns)
+
+    if missing_columns:
         st.error(
-            "The prediction response must contain patient_id and prediction."
+            "FastAPI returned an incomplete prediction response. "
+            f"Missing: {sorted(missing_columns)}"
         )
         return None
 
@@ -316,12 +321,31 @@ def fetch_api_predictions(concept: str, source_df: pd.DataFrame, submodel: str |
     ]
     prediction_columns = [column for column in prediction_columns if column in prediction_df.columns]
 
-    return source_df.merge(
+    result = source_df.merge(
         prediction_df[prediction_columns],
         on="patient_id",
         how="left",
-        validate="one_to_one"  # Ensure each patient_id has at most one prediction
+        validate="one_to_one",
     )
+
+    predicted_count = int(
+        result[f"{concept}_pred"].notna().sum()
+    )
+    selected_model = (
+        str(result[f"{concept}_submodel"].dropna().iloc[0])
+        if (
+            f"{concept}_submodel" in result.columns
+            and result[f"{concept}_submodel"].notna().any()
+        )
+        else submodel or "API-selected model"
+    )
+
+    st.success(
+        f"FastAPI returned {predicted_count:,} "
+        f"{concept} predictions using `{selected_model}`."
+    )
+
+    return result
 
 def store_prediction_result(
     concept: str,
@@ -336,6 +360,43 @@ def get_prediction_result(concept: str) -> pd.DataFrame | None:
         return result
 
     return None
+
+
+def get_or_fetch_prediction(
+    concept: str,
+    submitted: dict | None,
+    source_df: pd.DataFrame,
+    submodel: str | None,
+) -> pd.DataFrame | None:
+    """Fetch a batch result after submission and retain it across reruns."""
+    if submitted is not None:
+        prediction_df = fetch_api_predictions(
+            concept=concept,
+            source_df=source_df,
+            submodel=submodel,
+        )
+        if prediction_df is not None:
+            store_prediction_result(concept, prediction_df)
+        return prediction_df
+
+    stored_df = get_prediction_result(concept)
+    if stored_df is None or "patient_id" not in source_df.columns:
+        return stored_df
+
+    prediction_columns = [
+        column
+        for column in stored_df.columns
+        if column.startswith(f"{concept}_")
+    ]
+    if not prediction_columns:
+        return None
+
+    return source_df.merge(
+        stored_df[["patient_id", *prediction_columns]],
+        on="patient_id",
+        how="left",
+        validate="one_to_one",
+    )
 
 
 def get_prediction_coverage_frame(
@@ -419,7 +480,6 @@ churn_rate = df["patient_churn"].mean() if not empty else 0.0
 admission_rate = safe_div(df["patients_admitted"].sum(), df["patients_request"].sum())
 refusal_rate = safe_div(df["patients_refused"].sum(), df["patients_request"].sum())
 staff_att = safe_div(df["staff_present"].sum(), df["total_staff"].sum())
-
 
 # ──────────────────────────────────────────────
 # Pages
@@ -655,47 +715,35 @@ def page_patient_analytics():
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
 
-    if patient_prediction is None:
+    patient_prediction_df = get_or_fetch_prediction(
+        "patient_churn",
+        patient_prediction,
+        df,
+        choices.get("patient_churn"),
+    )
+    if patient_prediction_df is None:
         render_prediction_required_message("patient_churn")
     else:
-        patient_prediction_df = fetch_api_predictions(
-            concept="patient_churn",
-            source_df=df,
-            submodel=choices.get("patient_churn")
+        render_section_header(
+            "Database Churn Predictions",
+            "The graph is based on predictions returned by FastAPI.",
         )
-
-        if patient_prediction_df is not None:
-            store_prediction_result(
-                "patient_churn",
-                patient_prediction_df,
-            )
-
-            render_section_header(
-                "Database Churn Predictions",
-                "The graph is based on predictions returned by FastAPI.",
-            )
-
-            model_badge(
-                "patient_churn",
-                patient_prediction_df,
-            )
-
-            c1, c2 = st.columns(2)
-
-            with c1:
-                charts.churn_distribution(
-                    patient_prediction_df,
-                    CHURN_COLORS,
-                )
-
-            with c2:
-                charts.churn_confusion(
-                    patient_prediction_df,
-                )
+        model_badge("patient_churn", patient_prediction_df)
+        c1, c2 = st.columns(2)
+        with c1:
+            charts.churn_distribution(patient_prediction_df, CHURN_COLORS)
+        with c2:
+            charts.churn_confusion(patient_prediction_df)
 
     m = manifests.get("patient_churn")
-    if m and "patient_churn_submodel" in df.columns and df["patient_churn_submodel"].notna().any():
-        used = df["patient_churn_submodel"].dropna().iloc[0]
+    patient_result_df = get_prediction_result("patient_churn")
+    if (
+        m
+        and patient_result_df is not None
+        and "patient_churn_submodel" in patient_result_df.columns
+        and patient_result_df["patient_churn_submodel"].notna().any()
+    ):
+        used = patient_result_df["patient_churn_submodel"].dropna().iloc[0]
         met = m["metrics"].get(used, {})
         st.caption(f"Submodel **{used}** — accuracy {met.get('accuracy', 0):.3f}, "
                    f"F1 {met.get('f1', 0):.3f}, ROC-AUC {met.get('roc_auc', 0):.3f}")
@@ -756,52 +804,42 @@ def page_patient_management():
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
 
-    if risk_prediction is None:
+    risk_prediction_df = get_or_fetch_prediction(
+        "risk_level",
+        risk_prediction,
+        df,
+        choices.get("risk_level"),
+    )
+    if risk_prediction_df is None:
         render_prediction_required_message("risk_level")
     else:
-        risk_prediction_df = fetch_api_predictions(
-            concept="risk_level",
-            source_df=df,
-            submodel=choices.get("risk_level")
+        st.subheader("Database Risk-Level Predictions")
+        risk_counts = (
+            risk_prediction_df["risk_level_pred"]
+            .dropna()
+            .astype(str)
+            .str.title()
+            .value_counts()
+            .reindex(RISK_ORDER, fill_value=0)
+            .rename_axis("risk_level")
+            .reset_index(name="patients")
         )
-
-        if risk_prediction_df is not None:
-            store_prediction_result(
-                "risk_level",
-                risk_prediction_df,
-            )
-
-            st.subheader("Database Risk-Level Predictions")
-
-            risk_counts = (
-                risk_prediction_df["risk_level_pred"]
-                .dropna()
-                .astype(str)
-                .str.title()
-                .value_counts()
-                .reindex(RISK_ORDER, fill_value=0)
-                .rename_axis("risk_level")
-                .reset_index(name="patients")
-            )
-
-            fig = px.bar(
-                risk_counts,
-                x="risk_level",
-                y="patients",
-                color="risk_level",
-                color_discrete_map=RISK_COLORS,
-                text="patients",
-            )
-
-            fig.update_traces(textposition="outside")
-
-            styled_chart(
-                fig,
-                height=320,
-                showlegend=False,
-                xaxis_title="Predicted risk level",
-                yaxis_title="Patients",
-            )
+        fig = px.bar(
+            risk_counts,
+            x="risk_level",
+            y="patients",
+            color="risk_level",
+            color_discrete_map=RISK_COLORS,
+            text="patients",
+        )
+        fig.update_traces(textposition="outside")
+        styled_chart(
+            fig,
+            height=320,
+            showlegend=False,
+            xaxis_title="Predicted risk level",
+            yaxis_title="Patients",
+        )
 
     st.markdown("---")
 
@@ -809,7 +847,11 @@ def page_patient_management():
     with c1: q = st.text_input("Search patient (ID or name)", placeholder="e.g. PAT-… or Richard")
     with c2: f_service = st.multiselect("Service", sorted(df["service"].unique().tolist()), default=[])
     with c3: f_churn = st.selectbox("Churn status", ["All", "Churned", "Retained"])
-    with c4: f_risk = st.selectbox("Risk level", ["All", "Low", "Medium", "High"])
+    with c4:
+        f_risk = st.selectbox(
+            "Risk level",
+            ["All", "Low", "Medium", "High", "Critical"],
+        )
 
     c5, c6, c7 = st.columns(3)
     with c5: f_sat = st.slider("Satisfaction range", 0, 100, (0, 100))
@@ -837,6 +879,23 @@ def page_patient_management():
     tdf = tdf[(tdf["length_of_stay"] >= f_los[0]) & (tdf["length_of_stay"] <= f_los[1])]
     tdf = tdf[(tdf["age"] >= f_age[0]) & (tdf["age"] <= f_age[1])].sort_values("risk_score", ascending=False)
 
+    risk_result_df = get_prediction_result("risk_level")
+    if risk_result_df is not None:
+        risk_prediction_columns = [
+            column
+            for column in risk_result_df.columns
+            if column.startswith("risk_level_")
+        ]
+        if risk_prediction_columns:
+            tdf = tdf.merge(
+                risk_result_df[
+                    ["patient_id", *risk_prediction_columns]
+                ],
+                on="patient_id",
+                how="left",
+                validate="one_to_one",
+            )
+
     st.markdown(f"**{len(tdf):,} patients** match the table filters (sorted by risk score).")
 
     show_cols = ["patient_id", "name", "age", "service", "arrival_date", "departure_date",
@@ -857,8 +916,8 @@ def page_patient_management():
     pretty["Risk Score (heuristic)"] = pretty["Risk Score (heuristic)"].round(1)
     st.dataframe(pretty, use_container_width=True, height=420, hide_index=True)
 
-    model_badge("risk_level", df)
-    model_badge("patient_churn", df)
+    model_badge("risk_level", tdf)
+    model_badge("patient_churn", tdf)
 
     csv = pretty.to_csv(index=False).encode("utf-8")
     st.download_button("Download filtered patients (CSV)", csv, file_name="filtered_patients.csv", mime="text/csv")
@@ -938,41 +997,28 @@ def page_churn_analytics():
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
 
-    if churn_prediction is None:
+    churn_prediction_df = get_or_fetch_prediction(
+        "patient_churn",
+        churn_prediction,
+        df,
+        choices.get("patient_churn"),
+    )
+    if churn_prediction_df is None:
         render_prediction_required_message("patient_churn")
     else:
-        churn_prediction_df = fetch_api_predictions(
-            concept="patient_churn",
-            source_df=df,
-            submodel=choices.get("patient_churn")
-        )
-
-        if churn_prediction_df is not None:
-            store_prediction_result(
-                "patient_churn",
-                churn_prediction_df,
+        c1, c2 = st.columns(2)
+        with c1:
+            render_section_header(
+                "Predicted Churn Distribution",
+                "Model result for the filtered database records.",
             )
-
-            c1, c2 = st.columns(2)
-
-            with c1:
-                render_section_header(
-                    "Predicted Churn Distribution",
-                    "Model result for the filtered database records.",
-                )
-                charts.churn_distribution(
-                    churn_prediction_df,
-                    CHURN_COLORS,
-                )
-
-            with c2:
-                render_section_header(
-                    "Predicted Churn Confusion",
-                    "Observed database churn compared with model predictions.",
-                )
-                charts.churn_confusion(
-                    churn_prediction_df,
-                )
+            charts.churn_distribution(churn_prediction_df, CHURN_COLORS)
+        with c2:
+            render_section_header(
+                "Predicted Churn Confusion",
+                "Observed database churn compared with model predictions.",
+            )
+            charts.churn_confusion(churn_prediction_df)
     
     st.markdown("---")
 
@@ -1107,28 +1153,25 @@ def page_hospital_operations():
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
 
-    if risk_score_prediction is None:
+    risk_score_prediction_df = get_or_fetch_prediction(
+        "risk_score",
+        risk_score_prediction,
+        df,
+        choices.get("risk_score"),
+    )
+    if risk_score_prediction_df is None:
         render_prediction_required_message("risk_score")
     else:
-        risk_score_prediction_df = fetch_api_predictions(
-            concept="risk_score",
-            source_df=df,
-            submodel=choices.get("risk_score"),
+        charts.service_prediction_bar(
+            risk_score_prediction_df,
+            "risk_score",
+            SERVICE_COLORS,
         )
 
-        if risk_score_prediction_df is not None:
-            store_prediction_result(
-                "risk_score",
-                risk_score_prediction_df,
-            )
-            charts.service_prediction_bar(
-                risk_score_prediction_df,
-                "risk_score",
-                SERVICE_COLORS,
-            )
-
     render_section_header("Model-Predicted Risk Score by Service")
-    model_badge("risk_score", df)
+    risk_score_result = get_prediction_result("risk_score")
+    if risk_score_result is not None:
+        model_badge("risk_score", risk_score_result)
 
     render_section_header("Requests vs Admissions — Monthly")
     mon = (df.groupby(df["arrival_date"].dt.to_period("M"))
@@ -1266,30 +1309,21 @@ def page_staff_analytics():
                 services=sorted(df_raw["service"].dropna().unique().tolist()),
             )
 
-        if morale_prediction is None:
+        morale_prediction_df = get_or_fetch_prediction(
+            "staff_staff_morale",
+            morale_prediction,
+            df,
+            choices.get("staff_staff_morale"),
+        )
+        if morale_prediction_df is None:
             render_prediction_required_message("staff_staff_morale")
         else:
-            morale_prediction_df = fetch_api_predictions(
-                concept="staff_staff_morale",
-                source_df=df,
-                submodel=choices.get("staff_staff_morale")
+            model_badge("staff_staff_morale", morale_prediction_df)
+            charts.service_prediction_bar(
+                morale_prediction_df,
+                "staff_staff_morale",
+                SERVICE_COLORS,
             )
-
-            if morale_prediction_df is not None:
-                store_prediction_result(
-                    "staff_staff_morale",
-                    pd.DataFrame(morale_prediction_df),
-                )
-
-                model_badge(
-                    "staff_staff_morale",
-                    morale_prediction_df,
-                )
-                charts.service_prediction_bar(
-                    morale_prediction_df,
-                    "staff_staff_morale",
-                    SERVICE_COLORS,
-                )
 
     with c2:
         attendance_prediction = None
@@ -1320,28 +1354,21 @@ def page_staff_analytics():
                 services=sorted(df_raw["service"].dropna().unique().tolist()),
             )
 
-        if attendance_prediction is None:
+        attendance_prediction_df = get_or_fetch_prediction(
+            "staff_staff_attendance_rate",
+            attendance_prediction,
+            df,
+            choices.get("staff_staff_attendance_rate"),
+        )
+        if attendance_prediction_df is None:
             render_prediction_required_message("staff_staff_attendance_rate")
         else:
-            attendance_prediction_df = fetch_api_predictions(
-                concept="staff_staff_attendance_rate",
-                source_df=df,
-                submodel=choices.get("staff_staff_attendance_rate")
+            model_badge("staff_staff_attendance_rate", attendance_prediction_df)
+            charts.service_prediction_bar(
+                attendance_prediction_df,
+                "staff_staff_attendance_rate",
+                SERVICE_COLORS,
             )
-
-            if attendance_prediction_df is not None:
-                store_prediction_result(
-                    "staff_staff_attendance_rate",
-                    attendance_prediction_df,
-                )
-
-                model_badge("staff_staff_attendance_rate", attendance_prediction_df)
-
-                charts.service_prediction_bar(
-                    attendance_prediction_df,
-                    "staff_staff_attendance_rate",
-                    SERVICE_COLORS
-                )
     
     render_section_header("Bulk Predictions — Observed vs Predicted")
     model_badge("staff_staff_morale", df)
@@ -1455,29 +1482,25 @@ def page_service_performance():
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
 
-    if service_prediction is None:
+    service_prediction_df = get_or_fetch_prediction(
+        "service_performance",
+        service_prediction,
+        df,
+        choices.get("service_performance"),
+    )
+    if service_prediction_df is None:
         render_prediction_required_message("service_performance")
     else:
-        service_prediction_df = fetch_api_predictions(
-            concept="service_performance",
-            source_df=df,
-            submodel=choices.get("service_performance")
+        charts.service_prediction_bar(
+            service_prediction_df,
+            "service_performance",
+            SERVICE_COLORS,
         )
 
-        if service_prediction_df is not None:
-            store_prediction_result(
-                "service_performance",
-                service_prediction_df,
-            )
-
-            charts.service_prediction_bar(
-                service_prediction_df,
-                "service_performance",
-                SERVICE_COLORS,
-            )
-
     render_section_header("Model-Predicted Service Health")
-    model_badge("service_performance", df)
+    service_result = get_prediction_result("service_performance")
+    if service_result is not None:
+        model_badge("service_performance", service_result)
 
     tbl = (df.groupby("service")
            .agg(patients=("patient_id", "count"),
@@ -1605,55 +1628,45 @@ def page_operational_risk():
             services=sorted(df_raw["service"].dropna().unique().tolist()),
         )
 
-    if risk_level_prediction is None:
+    risk_level_df = get_or_fetch_prediction(
+        "risk_level",
+        risk_level_prediction,
+        df,
+        choices.get("risk_level"),
+    )
+    if risk_level_df is None:
         render_prediction_required_message("risk_level")
     else:
-        risk_level_df = fetch_api_predictions(
-            concept="risk_level",
-            source_df=df,
-            submodel=choices.get("risk_level")
+        render_section_header(
+            "Predicted Risk-Level Distribution",
+            "Model result calculated from the filtered database records.",
         )
-
-        if risk_level_df is not None:
-            store_prediction_result(
-                "risk_level",
-                risk_level_df,
-            )
-
-            render_section_header(
-                "Predicted Risk-Level Distribution",
-                "Model result calculated from the filtered database records.",
-            )
-
-            risk_counts = (
-                risk_level_df["risk_level_pred"]
-                .dropna()
-                .astype(str)
-                .str.title()
-                .value_counts()
-                .reindex(RISK_ORDER, fill_value=0)
-                .rename_axis("risk_level")
-                .reset_index(name="patients")
-            )
-
-            fig = px.bar(
-                risk_counts,
-                x="risk_level",
-                y="patients",
-                color="risk_level",
-                color_discrete_map=RISK_COLORS,
-                text="patients",
-            )
-
-            fig.update_traces(textposition="outside")
-
-            styled_chart(
-                fig,
-                height=320,
-                showlegend=False,
-                xaxis_title="Predicted risk level",
-                yaxis_title="Patients",
-            )
+        risk_counts = (
+            risk_level_df["risk_level_pred"]
+            .dropna()
+            .astype(str)
+            .str.title()
+            .value_counts()
+            .reindex(RISK_ORDER, fill_value=0)
+            .rename_axis("risk_level")
+            .reset_index(name="patients")
+        )
+        fig = px.bar(
+            risk_counts,
+            x="risk_level",
+            y="patients",
+            color="risk_level",
+            color_discrete_map=RISK_COLORS,
+            text="patients",
+        )
+        fig.update_traces(textposition="outside")
+        styled_chart(
+            fig,
+            height=320,
+            showlegend=False,
+            xaxis_title="Predicted risk level",
+            yaxis_title="Patients",
+        )
     
     st.markdown("---")
 

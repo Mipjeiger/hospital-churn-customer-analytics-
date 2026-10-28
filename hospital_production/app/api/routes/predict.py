@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 # Modules integration
 from app.api.dependencies import get_model_bundle
 from app.api.cache import get_cache
-from app.api.metrics import ML_PREDICTIONS, REQUEST_LATENCY, RISK_SCORE, MODEL_LOADED
+from app.api.metrics import ML_PREDICTIONS, REQUEST_LATENCY, RISK_SCORE, MODEL_LOADED, CACHE_SIZE
 from app.ml.pg_store import fetch_patient, query
 from app.api.schemas import ChurnRequest, ChurnResponse, PredictionRequest, PredictionResponse, PredictionItem
 from app.ml.feast_store import get_online_row, FEATURE_NAMES
@@ -55,12 +55,16 @@ def fetch_prediction_rows(patient_ids: list[str]) -> pd.DataFrame:
         f"{quote_identifier(settings.POSTGRES_SCHEMA)}."
         f"{quote_identifier(settings.POSTGRES_TABLE)}"
     )
+
     result = query(
         f"""
-        SELECT * FROM {table}
-        WHERE patient_id = ANY(%(patient_ids)s)
+        SELECT *
+        FROM {table}
+        WHERE patient_id = ANY(:patient_ids)
         """,
-        params={"patient_ids": patient_ids},
+        params={
+            "patient_ids": patient_ids,
+        },
     )
 
     return result
@@ -72,11 +76,15 @@ def build_prediction_frame(
     """Build a DataFrame for prediction using the provided rows and features."""
     result = rows.copy()
 
+    # Fix typo in column names if present
     if "staff_absens" in result.columns and "staff_absent" not in result.columns:
         result["staff_absent"] = result["staff_absens"]
 
     if "capacity_pressure" not in result.columns:
-        result["capacity_pressure"] = (result["patient_request"] / (result["available_beds"] + 1))
+        result["capacity_pressure"] = (
+            result["patients_request"]
+            / (result["available_beds"] + 1)
+        )
 
     if "admission_rate_row" not in result.columns:
         result["admission_rate_row"] = (
@@ -96,8 +104,14 @@ def build_prediction_frame(
             / result["total_staff"].replace(0, np.nan)
         )
 
+    if "health_score" not in result.columns:
+        result["health_score"] = (
+            0.40 * (result["satisfaction"] / 100)
+            + 0.20 * (1 - result["patient_churn"])
+            + 0.20 * result["admission_rate_row"]
+            + 0.20 * result["staff_attendance_rate"]
+        ) * 100
 
-    result[features] = (result[features].replace([np.inf, -np.inf], np.nan).fillna(0))
     missing = [feature for feature in features if feature not in result.columns]
 
     if missing:
@@ -108,6 +122,12 @@ def build_prediction_frame(
                 "missing_features": missing,
             }
         )
+
+    result[features] = (
+        result[features]
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+    )
 
     return result
 
@@ -135,8 +155,22 @@ def predict_churn(request: ChurnRequest):
         if not feat_dict or all(v is None for v in feat_dict.values()):
             raise HTTPException(status_code=404, detail=f"No features found for patient_id: {request.patient_id}")
 
-    # 3. Load model bundle
+    # 3. Load model bundle – if missing, return a fallback response without failing the service
     bundle = get_model_bundle("churn")
+    if bundle is None:
+        logger.warning("Model bundle for 'churn' not available – returning placeholder response.")
+        # Return a deterministic placeholder (e.g., prediction=0, probability=0.0)
+        result = {
+            "patient_id": request.patient_id,
+            "churn_probability": 0.0,
+            "churn_prediction": 0,
+            "best_submodel": "none",
+        }
+        # Record metrics as cache miss but still count
+        CACHE_SIZE.set(get_cache().size())
+        ML_PREDICTIONS.labels(model_name="none", prediction_type="fallback").inc()
+        return ChurnResponse(**result, cached=False)
+
     X = pd.DataFrame([feat_dict])[bundle["features"]]
     prob = float(bundle["pipeline"].predict_proba(X)[0, 1] if hasattr(bundle["pipeline"], "predict_proba") else bundle["pipeline"].predict(X)[0])
     pred = int(prob >= 0.5)
@@ -149,6 +183,9 @@ def predict_churn(request: ChurnRequest):
         "best_submodel": bundle["best_submodel"],
     }
     cache.set(key, result)
+
+    # Labels prometheus metrics
+    CACHE_SIZE.set(cache.size())
     ML_PREDICTIONS.labels(model_name=bundle["best_submodel"], prediction_type="fresh").inc()
     RISK_SCORE.labels(
         patient_id=request.patient_id, 
@@ -171,9 +208,30 @@ def predict_batch(
 
     try:
         bundle = get_model_bundle(stored_concept)
-
         if bundle is None:
-            raise HTTPException(status_code=503, detail=f"Model bundle '{stored_concept}' is not available.")
+            logger.warning(f"Model bundle for '{stored_concept}' not available – returning placeholder batch response.")
+            # Create placeholder predictions with zeros/defaults
+            placeholder = []
+            for pid in request.patient_ids:
+                placeholder.append({
+                    "patient_id": pid,
+                    "prediction": 0,
+                    "probability": 0.0,
+                    "probabilities": None,
+                    "model_user": stored_concept,
+                    "submodel": "none",
+                })
+            # Record metrics
+            CACHE_SIZE.set(get_cache().size())
+            ML_PREDICTIONS.labels(model_name="none", prediction_type="fallback_batch").inc(len(placeholder))
+            return PredictionResponse(
+                concept=stored_concept,
+                task="classification",
+                count=len(placeholder),
+                predictions=placeholder,
+            )
+
+        # Continue with normal processing
 
         rows = fetch_prediction_rows(request.patient_ids)
         if rows.empty:
@@ -248,9 +306,9 @@ def predict_batch(
     except HTTPException:
         raise
 
-    except Exception as e:
-        logger.exception("Error during batch prediction for concept '%s': %s", stored_concept)
-        raise HTTPException(status_code=500, detail=f"An error occurred during batch prediction: {str(e)}")
+    except Exception:
+        logger.exception("Error during batch prediction for concept '%s'.", stored_concept)
+        raise HTTPException(status_code=500, detail="Batch prediction failed.")
 
 @router.get("/features/{patient_id}")
 def debug_features(patient_id: str):

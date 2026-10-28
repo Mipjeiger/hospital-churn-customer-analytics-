@@ -117,8 +117,7 @@ const MLModels: React.FC = () => (
     <p className="page-desc">
       Model health from <code>GET /model</code> and{" "}
       <code>GET /model/&#123;name&#125;/health</code>. Training metrics
-      (accuracy, ROC-AUC, F1) are stored in MinIO manifests and are not
-      directly exposed by the API.
+      (accuracy, ROC-AUC, F1) are stored in MinIO manifests.
     </p>
 
     <ModelList />

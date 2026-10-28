@@ -10,7 +10,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 
 # ──────────────────────────────────────────────
-# Path setup
+# Path setup (unchanged, but now after imports)
 # ──────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STREAMLIT_DIR = Path(__file__).resolve().parent
@@ -21,9 +21,10 @@ from app.api.config import settings
 from app.streamlit.metrics import start_metrics_server, update_dashboard_metrics
 from app.ml.minio_store import _client
 
-# ── NEW: import the two new UI modules
+# ── NEW: import the UI helper modules
 from app.streamlit import predict_ui, charts
 from app.streamlit.api_client import PredictionAPIError, predict_from_api
+from app.streamlit.components import layout
 
 # ──────────────────────────────────────────────
 # Constants
@@ -53,36 +54,12 @@ NAV_PAGES = [
 # ──────────────────────────────────────────────
 # Page config & styles
 # ──────────────────────────────────────────────
-st.set_page_config(
-    page_title="Hospital Care Analytics",
-    page_icon="🏥",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+layout.initialize_page()
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.block-container { padding-top: 1.2rem; padding-bottom: 1rem; }
-h1 { font-weight: 700; color: #0F2A44; letter-spacing: -0.02em; }
-h2 { color: #0F2A44; font-weight: 700; font-size: 1.35rem; margin-top: 1.6rem; border-bottom: 1px solid #E8EEF3; padding-bottom: 0.4rem; }
-h3 { color: #1a3a5c; font-weight: 600; font-size: 1.05rem; margin-top: 1rem; }
-.kpi-card { background: white; border: 1px solid #E6EBF0; border-radius: 12px; padding: 16px 18px; box-shadow: 0 1px 3px rgba(15,42,68,0.06); }
-.kpi-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: #6B7C93; font-weight: 600; }
-.kpi-value { font-size: 1.55rem; font-weight: 700; color: #0F2A44; margin-top: 4px; }
-.kpi-sub { font-size: 0.78rem; color: #8A9BB0; margin-top: 2px; }
-.section-desc { color: #5A6D85; font-size: 0.9rem; margin-top: -6px; margin-bottom: 12px; }
-.insight-box { background: #F0F7F7; border-left: 4px solid #0E7C7B; border-radius: 8px; padding: 10px 14px; margin: 6px 0; font-size: 0.88rem; color: #1a3a5c; }
-.insight-warn { background: #FFF7E6; border-left-color: #E6A817; }
-.insight-bad  { background: #FFF0F0; border-left-color: #D64545; }
-[data-testid="stSidebar"] { background: #0F2A44; }
-[data-testid="stSidebar"] * { color: #E8EEF3; }
-[data-testid="stSidebar"] .stRadio label { color: #E8EEF3 !important; }
-hr { border-color: #E8EEF3; }
-</style>
-""", unsafe_allow_html=True)
-
+# ──────────────────────────────────────────────
+# Page config & styles
+# ──────────────────────────────────────────────
+# (removed, now handled by layout.initialize_page())
 # ──────────────────────────────────────────────
 # Metrics server
 # ──────────────────────────────────────────────
@@ -405,47 +382,20 @@ except Exception as e:
     st.error(f"Failed to load dataset: {e}")
     st.stop()
 
-with st.sidebar:
-    st.markdown("## 🏥 Hospital Care Analytics")
-    st.markdown(
-        '<div style="color:#8AB4B5; font-size:0.82rem; margin-top:-8px; margin-bottom:16px;">'
-        'Operational & Patient Intelligence</div>',
-        unsafe_allow_html=True,
-    )
-
-    nav = st.radio("Navigation", NAV_PAGES, label_visibility="collapsed")
-    st.markdown("---")
-    st.markdown("### Filters")
-
-    min_d = df_raw["arrival_date"].min().date()
-    max_d = df_raw["arrival_date"].max().date()
-    d_range = st.date_input("Arrival date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
-    start_d, end_d = d_range if isinstance(d_range, tuple) and len(d_range) == 2 else (min_d, max_d)
-
-    all_services = sorted(df_raw["service"].dropna().unique().tolist())
-    sel_services = st.multiselect("Service", all_services, default=all_services)
-
-    age_min, age_max = int(df_raw["age"].min()), int(df_raw["age"].max())
-    age_range = st.slider("Age range", age_min, age_max, (age_min, age_max))
-    churn_opt = st.selectbox("Patient churn", ["All", "Churned", "Retained"])
-
-    st.markdown("---")
-    st.caption("Operational and analytical use only. No clinical diagnosis or medical advice.")
-
-    st.markdown("---")
-    st.markdown("### 🧠 Models")
-    manifests = load_manifests()
-    if manifests:
-        st.caption(f"{len(manifests)}/{len(MODEL_CONCEPTS)} models loaded.")
-        st.markdown(
-            "".join(f'<div style="font-size:0.78rem;color:#8AB4B5;">✅ {c}</div>' for c in manifests),
-            unsafe_allow_html=True,
-        )
-    else:
-        st.warning("No manifests available.")
-
-    st.markdown("### 🎛️ Model Selection")
-    choices = build_model_selection(manifests)
+sidebar_state = layout.render_sidebar(
+    df_raw=df_raw,
+    nav_pages=NAV_PAGES,
+    manifests=load_manifests(),
+    build_model_selection_func=build_model_selection,
+    settings=settings,
+)
+nav = sidebar_state["nav"]
+(start_d, end_d) = sidebar_state["date_range"]
+sel_services = sidebar_state["services"]
+age_range = sidebar_state["age_range"]
+churn_opt = sidebar_state["churn_opt"]
+choices = sidebar_state["choices"]
+manifests = sidebar_state["manifests"]
 
 # Apply filters
 df = df_raw.copy()

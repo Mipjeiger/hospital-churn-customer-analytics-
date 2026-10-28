@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from app.streamlit.predict import predict_one
 
 """Reusable Streamlit form for manual single-row prediction."""
 
@@ -29,38 +28,59 @@ def prediction_form(
     defaults: dict,
     form_key: str,
     services: list[str] | None = None,
-) -> None:
+) -> dict | None:
     """Render a form the concept's features and show the prediction result."""
-    from app.ml.registry import load_concept
-    bundle = load_concept(concept)
-    features = bundle["features"]
-
-    # Make the form key globally unique
-    unique_form_key = f"{form_key}__{concept}"
+    unique_form_key = f"{form_key}_{concept}"
 
     with st.form(key=unique_form_key):
         cols = st.columns(3)
         values = {}
-        for i, f in enumerate(features):
-            with cols[i % 3]:
-                d = defaults.get(f, 0)
 
-                if f == "service" and services:
-                    idx = services.index(d) if d in services else 0
-                    values[f] = st.selectbox(f, services, index=idx, key=f"{unique_form_key}_{f}")
-                elif isinstance(d, bool):
-                    values[f] = st.checkbox(f, value=d, key=f"{unique_form_key}_{f}")
-                elif isinstance(d, int):
-                    values[f] = st.number_input(f, value=int(d), step=1, key=f"{unique_form_key}_{f}")
+        for index, feature in enumerate(defaults):
+            with cols[index % 3]:
+                default_value = defaults[feature]
+
+                if feature == "service" and services:
+                    service_index = services.index(default_value) if default_value in services else 0
+                    values[feature] = st.selectbox(
+                        feature,
+                        services,
+                        index=service_index,
+                        key=f"{unique_form_key}_{feature}"
+                    )
+
+                elif isinstance(default_value, bool):
+                    values[feature] = st.checkbox(
+                        feature,
+                        value=default_value,
+                        key=f"{unique_form_key}_{feature}"
+                    )
+
+                elif isinstance(default_value, int):
+                    values[feature] = st.number_input(
+                        feature,
+                        value=default_value,
+                        step=1,
+                        key=f"{unique_form_key}_{feature}"
+                    )
+
                 else:
-                    values[f] = st.number_input(f, value=float(d), step=0.1, key=f"{unique_form_key}_{f}")
+                    values[feature] = st.number_input(
+                        feature,
+                        value=float(default_value),
+                        step=0.1,
+                        key=f"{unique_form_key}_{feature}"
+                    )
 
-        # ✅ Pass a unique key to the submit button
-        submitted = st.form_submit_button("🔮 Predict", key=f"{unique_form_key}_submit")
+        submitted = st.form_submit_button("Predict", key=f"{unique_form_key}_submit")
 
-    if submitted:
-        try:
-            result = predict_one(concept, submodel, values)
-            _render_result(result)
-        except Exception as e:
-            st.error(f"Prediction failed: {e}")
+    if not submitted:
+        return None
+
+    # Call the prediction API
+    return {
+        "concept": concept,
+        "submodel": submodel,
+        "submitted": True,
+        "input": values
+    }

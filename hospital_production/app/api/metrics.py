@@ -64,3 +64,8 @@ BUSINESS_KPI = Gauge(
     "Business KPI derived from ML/LLM",
     ["kpi_name"],
 )
+
+CACHE_SIZE = Gauge(
+    "ml_cache_size",
+    "Current number of entries in the prediction inference cache",
+)

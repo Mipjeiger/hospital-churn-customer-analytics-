@@ -4,7 +4,6 @@ load_dotenv(Path(__file__).parents[2] / ".env")
 
 import json
 import logging
-from langfuse import observe, get_client, Langfuse
 from huggingface_hub import InferenceClient
 from groq import Groq
 from openai import OpenAI
@@ -14,16 +13,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 """Langfused traced LLM agent"""
-
-# Configuration LLM API keys
-if not settings.LANGFUSE_PUBLIC_KEY:
-    raise RuntimeError("LANGFUSE_PUBLIC_KEY is not set in .env. Please set it to your Langfuse public key.")
-
-if not settings.LANGFUSE_SECRET_KEY:
-    raise RuntimeError("LANGFUSE_SECRET_KEY is not set in .env. Please set it to your Langfuse secret key.")
-
-# Langfuse client configuration
-langfuse = get_client() 
 
 # Hunggingface Configuration
 hf = (
@@ -80,12 +69,9 @@ def _call(client, model, messages, tools, max_tokens, temperature):
         kwargs["tool_choice"] = "auto"
     return client.chat.completions.create(**kwargs)
 
-# Observe langfuse endpoint LLM agent
-@observe(name="llm-router")
 def llm_router(messages, tools=None, temperature=0.3, max_tokens=512, provider_name="router"):
     """Langfuse traced LLM agent for multiple LLM providers"""
     messages = _normalize_messages(messages)
-    langfuse = get_client()
 
     providers = [
         ("huggingface", hf, "Qwen/Qwen2.5-Coder-32B-Instruct", _call),
@@ -94,7 +80,6 @@ def llm_router(messages, tools=None, temperature=0.3, max_tokens=512, provider_n
     ]
 
     valid_providers = {"router", "huggingface", "groq", "ninerouter"}
-
     if provider_name not in valid_providers:
         raise ValueError(
             f"Unsupported provider '{provider_name}'. "
@@ -102,7 +87,7 @@ def llm_router(messages, tools=None, temperature=0.3, max_tokens=512, provider_n
         )
 
     if provider_name != "router":
-        providers = [provider for provider in providers if provider[0] == provider_name]
+        providers = [p for p in providers if p[0] == provider_name]
 
     for selected_provider, client_obj, model_name, call_fn in providers:
         if client_obj is None:
@@ -113,39 +98,17 @@ def llm_router(messages, tools=None, temperature=0.3, max_tokens=512, provider_n
             message = r.choices[0].message
             content = message.content or ""
 
-            # Update observation using get_client() SDK method
-            langfuse.update_current_span(
-                level="DEFAULT",
-                status_message=f"{selected_provider} responded",
-                output=content,
-                metadata={
-                    "model": model_name,
-                    "provider": selected_provider,
-                },
-            )
-
             return {
                 "text": content,
                 "tool_calls": getattr(message, "tool_calls", None),
                 "provider": selected_provider
             }
 
-        except Exception as exc:
-            logger.exception(
-                "%s provider failed",
-                selected_provider,
-            )
-
-            langfuse.update_current_span(
-                level="ERROR",
-                status_message=(
-                    f"{selected_provider} failed: {str(exc)[:200]}"
-                ),
-            )
+        except Exception:
+            logger.exception("%s provider failed", selected_provider)
             
     raise RuntimeError("All LLM providers failed")
 
-@observe(name="hospital-agent")
 def run_agent(user_message, tools_schema, tool_map, history=None, max_steps=5):
     """Langfuse running agent with tools and observation"""
     messages = [

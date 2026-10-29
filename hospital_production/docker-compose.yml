@@ -220,10 +220,27 @@ services:
       - ./app/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./app/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
-      - pushgateway
       - prometheus
+      - pushgateway
     networks:
       - hospital_network
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        VITE_API_BASE_URL: /api
+    container_name: frontend
+    dns:
+      - 182.8.64.6
+      - 182.12.0.5
+    ports:
+      - "8085:8085"
+    networks:
+      - hospital_network
+    depends_on:
+      - fastapi
 
   streamlit:
     build:
@@ -253,20 +270,6 @@ services:
       - fastapi
     networks:
       - hospital_network
-
-  frontend:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.frontend
-      args:
-        VITE_API_BASE_URL: http://fastapi:8000
-    container_name: frontend
-    ports:
-      - "8085:8085"
-    networks:
-      - hospital_network
-    depends_on:
-      - fastapi
 
 volumes:
   pgdata:

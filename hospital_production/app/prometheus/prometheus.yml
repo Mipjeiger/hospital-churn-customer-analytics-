@@ -5,16 +5,25 @@ global:
 scrape_configs:
   - job_name: "hospital_api"
     static_configs:
-      - targets: ["fastapi:8000"]
+      - targets:
+        - "fastapi:8000"
 
   - job_name: "prefect_metrics"
     static_configs:
-      - targets: ["fastapi:8001"]
+      - targets:
+        - "fastapi:8001"
 
   - job_name: "frontend"
-    static_configs:
-      - targets: ["frontend:8085"]
     metrics_path: /metrics
+    static_configs:
+      - targets:
+        - "frontend:8085"
+
+  - job_name: "prefect"
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+        - "prefect:4200"
 
 rule_files:
   - /etc/prometheus/alerts.yml

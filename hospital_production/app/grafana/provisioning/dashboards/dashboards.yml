@@ -1,6 +1,7 @@
 apiVersion: 1
+
 providers:
-  - name: hospital
+  - name: Hospital Dashboards
     orgId: 1
     folder: Hospital
     type: file
@@ -9,4 +10,4 @@ providers:
     allowUiUpdates: true
     options:
       path: /var/lib/grafana/dashboards
-      foldersFromFilesStructure: true
+      foldersFromFilesStructure: false

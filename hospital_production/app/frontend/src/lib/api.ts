@@ -3,7 +3,26 @@
  * All requests go through /api which Vite proxies to VITE_API_BASE_URL (default: http://localhost:8000).
  */
 
-const BASE = "/api";
+/**
+ * Resolves the backend base URL for browser requests.
+ * - If VITE_API_BASE_URL is explicitly set to a valid URL, use it.
+ * - If VITE_API_BASE_URL is omitted or set to the Docker-internal hostname 'http://fastapi:8000'
+ *   (which the host browser cannot resolve via DNS), automatically resolve to 'http://localhost:8000'
+ *   where the FastAPI container's port 8000 is mapped.
+ */
+function resolveApiBase(): string {
+  const envUrl = (import.meta as any).env?.VITE_API_BASE_URL as string | undefined;
+  if (!envUrl) {
+    return "http://localhost:8000";
+  }
+  const trimmed = envUrl.trim().replace(/\/+$/, "");
+  if (typeof window !== "undefined" && trimmed.includes("fastapi:")) {
+    return "http://localhost:8000";
+  }
+  return trimmed;
+}
+
+const BASE = resolveApiBase();
 
 async function request<T>(
   path: string,

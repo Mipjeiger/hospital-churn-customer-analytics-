@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import numpy as np
+import joblib
 import logging
 
 from dotenv import load_dotenv
@@ -78,15 +79,20 @@ class LLMClient:
     def load_models(self):
         """Load ML models from the specified path."""
         self.models = {}
+        
         for model_key in MODELS_KEYS:
             model_path = settings.ML_MODEL_PATH / f"{model_key}.joblib"
 
-            if model_path.exists():
-                try:
-                    self.models[model_key] = model_path
-                    logger.info(f"Loaded model: {model_key} from {model_path}")
-                except Exception as e:
-                    logger.error(f"❌ Error loading model {model_key}: {e}")
+            if not model_path.is_file():
+                logger.info(f"Local model file not found for '{model_key}'. Attempting to load from MinIO Store...")
+                continue
+
+            try:
+                self.models[model_key] = joblib.load(model_path)
+                logger.info(f"✅ Loaded model '{model_key}' from {model_path}.")
+
+            except Exception as e:
+                logger.error(f"❌ Error loading model '{model_key}' from {model_path}: {e}")
 
         return self.models
 

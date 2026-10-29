@@ -2,7 +2,7 @@ import time
 import mlflow
 from mlflow.entities import SpanType
 from app.api.config import settings
-from app.llm.agent_langfuse import llm_router
+from app.llm.agent import llm_router
 
 """Instrument LLM calls as MLflow Traces"""
 
@@ -43,9 +43,11 @@ def traced_llm(messages, tools=None, temperature=0.3, max_tokens=512, model_name
 def traced_agent(user_message, tools_schema, tool_map, history=None, max_steps=5):
     """MLflow traced LLM agent on the JSON schema of tools"""
     import json
-    messages = [{"role": "system",
-                 "content": "You are an AI Hospital Operations Analyst. "
-                            "Call tools for facts. Never invent numbers."}]
+    messages = [
+        {"role": "system",
+        "content": "You are an AI Hospital Operations Analyst. "
+                            "Call tools for facts. Never invent numbers."}
+    ]
     if history:
         messages += history
 
@@ -60,17 +62,27 @@ def traced_agent(user_message, tools_schema, tool_map, history=None, max_steps=5
 
             if not tcs:
                 span.set_outputs({"final": r["text"][:500]})
-                mlflow.log_metric({
+                mlflow.log_metrics({
                     "agent_steps": step + 1,
-                    "agent_tool_calls": tool_calls_total
+                    "agent_tool_calls": tool_calls_total,
                 })
                 return r["text"]
 
-            messages.append({"role": "assistant", "content": r["text"] or None,
-                             "tool_calls": [{"id": tc.id, "type": "function",
-                                             "function": {"name": tc.function.name,
-                                                          "arguments": tc.function.arguments}}
-                                            for tc in tcs]})
+            messages.append({
+                "role": "assistant",
+                "content": r["text"] or None,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in tcs
+                ],
+            })
 
             for tc in tcs:
                 with mlflow.start_span(name=f"tool_{tc.function.name}", span_type=SpanType.TOOL) as tool_span:
@@ -79,10 +91,12 @@ def traced_agent(user_message, tools_schema, tool_map, history=None, max_steps=5
                     result = tool_map[tc.function.name](**args)
                     tool_span.set_outputs(result)
 
-                    # Count total tool calls for metrics
                     tool_calls_total += 1
-                    messages.append({"role": "tool", "tool_call_id": tc.id,
-                                     "name": tc.function.name,
-                                     "content": json.dumps(result, default=str)})
-    
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tc.function.name,
+                        "content": json.dumps(result, default=str),
+                    })
+
     return "Max steps reached."

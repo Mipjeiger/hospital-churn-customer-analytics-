@@ -1,14 +1,16 @@
 import app.flows._metrics  # ensure Prometheus exporter starts with FastAPI
+import os
 import time
 import logging
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from api.routes import llm, predict
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
 from contextlib import asynccontextmanager
 from app.ml.feast_store import get_store
 from app.api.dependencies import get_model_bundle
-from app.api.metrics import REQUEST_COUNT, REQUEST_LATENCY, MODEL_LOADED, BUSINESS_KPI
+from app.api.metrics import REQUEST_COUNT, REQUEST_LATENCY, MODEL_LOADED, BUSINESS_KPI, CACHE_SIZE
 from app.api.config import settings
 from app.ml.pg_store import query
 from app.ml.registry import load_concept
@@ -77,8 +79,20 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("🛑 API shutting down")
 
-# Build FastAPI app
 app = FastAPI(title="Hospital Operations API", version="1.0.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",   # Vite dev server
+        "http://127.0.0.1:5173",
+        "http://localhost:8085",   # nginx production container
+        "http://127.0.0.1:8085",
+        os.getenv("FRONTEND_ORIGIN", ""),  # configurable prod origin
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ──────────────────────────────────────────────
 # Middleware — request metrics + latency header
@@ -113,6 +127,11 @@ def health_check():
 
 @app.get("/metrics")
 def metrics():
+    try:
+        from app.api.cache import get_cache
+        CACHE_SIZE.set(get_cache().size())
+    except Exception:
+        pass
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # Get the list models loaded by MinIO Store
@@ -245,7 +264,7 @@ def business_kpi():
         BUSINESS_KPI.labels(kpi_name=kpi_name).set(value)
 
     return kpis
-
+    
 @app.post("/business-kpi/model-accuracy/refresh")
 def refresh_model_accuracy():
     update_model_accuracy_metrics()

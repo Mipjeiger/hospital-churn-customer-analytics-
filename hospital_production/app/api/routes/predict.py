@@ -46,7 +46,6 @@ def quote_identifier(identifier: str) -> str:
     """Safely quote a PostgreSQL identifier."""
     if not identifier.replace("_", "").isalnum():
         raise ValueError(f"Invalid PostgreSQL identifier: {identifier}")
-
     return f'"{identifier}"'
 
 def fetch_prediction_rows(patient_ids: list[str]) -> pd.DataFrame:
@@ -55,55 +54,31 @@ def fetch_prediction_rows(patient_ids: list[str]) -> pd.DataFrame:
         f"{quote_identifier(settings.POSTGRES_SCHEMA)}."
         f"{quote_identifier(settings.POSTGRES_TABLE)}"
     )
-
     result = query(
         f"""
         SELECT *
         FROM {table}
         WHERE patient_id = ANY(:patient_ids)
         """,
-        params={
-            "patient_ids": patient_ids,
-        },
+        params={"patient_ids": patient_ids},
     )
-
     return result
 
-def build_prediction_frame(
-    rows: pd.DataFrame,
-    features: list[str],
-) -> pd.DataFrame:
+def build_prediction_frame(rows: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     """Build a DataFrame for prediction using the provided rows and features."""
     result = rows.copy()
 
-    # Fix typo in column names if present
+    # Features engineering
     if "staff_absens" in result.columns and "staff_absent" not in result.columns:
         result["staff_absent"] = result["staff_absens"]
-
     if "capacity_pressure" not in result.columns:
-        result["capacity_pressure"] = (
-            result["patients_request"]
-            / (result["available_beds"] + 1)
-        )
-
+        result["capacity_pressure"] = (result["patients_request"] / (result["available_beds"] + 1))
     if "admission_rate_row" not in result.columns:
-        result["admission_rate_row"] = (
-            result["patients_admitted"]
-            / result["patients_request"].replace(0, np.nan)
-        )
-
+        result["admission_rate_row"] = (result["patients_admitted"] / result["patients_request"].replace(0, np.nan))
     if "refusal_rate_row" not in result.columns:
-        result["refusal_rate_row"] = (
-            result["patients_refused"]
-            / result["patients_request"].replace(0, np.nan)
-        )
-
+        result["refusal_rate_row"] = (result["patients_refused"] / result["patients_request"].replace(0, np.nan))
     if "staff_attendance_rate" not in result.columns:
-        result["staff_attendance_rate"] = (
-            result["staff_present"]
-            / result["total_staff"].replace(0, np.nan)
-        )
-
+        result["staff_attendance_rate"] = (result["staff_present"] / result["total_staff"].replace(0, np.nan))
     if "health_score" not in result.columns:
         result["health_score"] = (
             0.40 * (result["satisfaction"] / 100)
@@ -112,23 +87,15 @@ def build_prediction_frame(
             + 0.20 * result["staff_attendance_rate"]
         ) * 100
 
-    missing = [feature for feature in features if feature not in result.columns]
+    missing = [f for f in features if f not in result.columns]
 
     if missing:
         raise HTTPException(
             status_code=422,
-            detail={
-                "message": "Required model features are missing.",
-                "missing_features": missing,
-            }
+            detail={"message": "Required model features are missing.", "missing_features": missing},
         )
-
-    result[features] = (
-        result[features]
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
-    )
-
+    
+    result[features] = result[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     return result
 
 # ===== Prediction Endpoint =====
@@ -143,7 +110,7 @@ def predict_churn(request: ChurnRequest):
         logger.info(f"Cache hit for patient_id: {request.patient_id}")
         ML_PREDICTIONS.labels(model_name=hit["best_submodel"], prediction_type="cache_hit").inc()
         return ChurnResponse(**hit, cached=True)
-
+    
     # 2. Feature lookup using Feast ONLINE store
     with REQUEST_LATENCY.labels(endpoint="/predict/churn").time():
         try:
@@ -151,172 +118,144 @@ def predict_churn(request: ChurnRequest):
         except Exception as e:
             logger.error(f"Feature lookup failed for patient_id: {request.patient_id} | Error: {e}")
             raise HTTPException(status_code=500, detail=f"Feast look up failed: {str(e)}")
-
         if not feat_dict or all(v is None for v in feat_dict.values()):
             raise HTTPException(status_code=404, detail=f"No features found for patient_id: {request.patient_id}")
-
-    # 3. Load model bundle – if missing, return a fallback response without failing the service
+    
+    # 3. Load model bundle – strict validation
     bundle = get_model_bundle("churn")
-    if bundle is None:
-        logger.warning("Model bundle for 'churn' not available – returning placeholder response.")
-        # Return a deterministic placeholder (e.g., prediction=0, probability=0.0)
-        result = {
-            "patient_id": request.patient_id,
-            "churn_probability": 0.0,
-            "churn_prediction": 0,
-            "best_submodel": "none",
-        }
-        # Record metrics as cache miss but still count
-        CACHE_SIZE.set(get_cache().size())
-        ML_PREDICTIONS.labels(model_name="none", prediction_type="fallback").inc()
-        return ChurnResponse(**result, cached=False)
+    if not isinstance(bundle, dict):
+        logger.error("Model bundle for 'churn' not found in MinIO.")
+        raise HTTPException(status_code=500, detail="Model bundle not available.")
 
+    # Ensure required entries are present
+    required_keys = {"features", "pipeline", "best_submodel"}
+    missing_keys = required_keys - bundle.keys()
+    
+    if missing_keys:
+        logger.error(f"Model bundle missing required keys: {missing_keys}")
+        raise HTTPException(status_code=500, detail=f"Model bundle incomplete: missing {missing_keys}")
+
+    # Build input DataFrame using declared features
     X = pd.DataFrame([feat_dict])[bundle["features"]]
-    prob = float(bundle["pipeline"].predict_proba(X)[0, 1] if hasattr(bundle["pipeline"], "predict_proba") else bundle["pipeline"].predict(X)[0])
-    pred = int(prob >= 0.5)
+    pipeline = bundle["pipeline"]
+    
+    try:
+        prediction = pipeline.predict(X)
+        pred = int(prediction[0])
 
-    # 4. Cache + metrics
-    result = {
-        "patient_id": request.patient_id,
-        "churn_probability": round(prob, 4),
-        "churn_prediction": pred,
-        "best_submodel": bundle["best_submodel"],
-    }
+        if not hasattr(pipeline, "predict_proba"):
+            prob = float(pred)
+        else:
+            probabilities = np.asarray(pipeline.predict_proba(X))
+            
+            if probabilities.ndim != 2 or probabilities.shape[0] == 0:
+                raise ValueError(f"Unexpected shape for predict_proba output: {probabilities.shape}")
+            if probabilities.shape[1] == 1:
+                class_value = getattr(pipeline, "classes_", [pred])[0]
+                class_value = int(class_value)
+                prob = float(probabilities[0, 0]) if class_value == pred else 1.0 - float(probabilities[0, 0])
+            elif probabilities.shape[1] == 2:
+                classes = getattr(pipeline, "classes_", [0, 1])
+                positive_index = list(classes).index(1)
+                prob = float(probabilities[0, positive_index])
+            else:
+                raise ValueError("Churn model must have binary classification output for predict_proba.")
+            
+        pred = int(prob >= 0.5)
+    except (IndexError, TypeError, ValueError) as e:
+        logger.exception("Failed to calculate churn probability for patient_id: %s | Error: %s", request.patient_id, e)
+        raise HTTPException(status_code=500, detail="Model prediction failed due to unexpected output format.") from e
+    
+    result = {"patient_id": request.patient_id, "churn_probability": round(prob, 4), "churn_prediction": pred, "best_submodel": bundle["best_submodel"]}
+    
+    # Metrics and caching
     cache.set(key, result)
-
-    # Labels prometheus metrics
     CACHE_SIZE.set(cache.size())
     ML_PREDICTIONS.labels(model_name=bundle["best_submodel"], prediction_type="fresh").inc()
-    RISK_SCORE.labels(
-        patient_id=request.patient_id, 
-        service=str(feat_dict.get("service", "unknown"))
-    ).set(prob)
+    RISK_SCORE.labels(patient_id=request.patient_id, service=str(feat_dict.get("service", "unknown"))).set(prob)
     MODEL_LOADED.labels(model_name=bundle["best_submodel"]).set(1)
-
     return ChurnResponse(**result, cached=False)
 
-@router.post(
-    "/{concept}/batch",
-    response_model=PredictionResponse,
-)
-def predict_batch(
-    concept: str,
-    request: PredictionRequest,
-):
-    """Retrieve patient data from PostgreSQL and predict with a MinIO model."""
+# ==== Batch Prediction Endpoint =====
+@router.post("/{concept}/batch", response_model=PredictionResponse)
+def predict_batch(concept: str, request: PredictionRequest):
     stored_concept = resolve_model_concept(concept)
+    bundle = get_model_bundle(stored_concept)
+    
+    if bundle is None:
+        logger.error(f"Model bundle for concept '{stored_concept}' not found in MinIO.")
+        raise HTTPException(status_code=500, detail="Model bundle not available.")
+    
+    # Fetch rows patient data from PostgreSQL
+    rows = fetch_prediction_rows(request.patient_ids)
+    if rows.empty:
+        raise HTTPException(status_code=404, detail="No patient data found for the provided IDs.")
 
+    # Load bundle and determine the submodel to use for prediction
+    models = bundle.get("models", {})
+    features = bundle["features"]
+    task = bundle["task"]
+
+    if not models:
+        raise HTTPException(status_code=500, detail=f"No models found for concept '{stored_concept}'.")
+
+    submodel = request.submodel
+    if submodel is None:
+        metric_name = "roc_auc" if task == "classification" else "r2"
+        submodel = max(models, key=lambda n: models[n]["metrics"].get(metric_name) or float("-inf"))
+
+    if submodel not in models:
+        raise HTTPException(status_code=400, detail=f"Submodel '{submodel}' is not available. Available submodels: {list(models)}")
+
+    # Perform batch prediction using the selected submodel
+    model_entry = models[submodel]
+    pipeline = model_entry.get("pipeline")
+    prediction_frame = build_prediction_frame(rows, features)
+
+    X = prediction_frame[features]
     try:
-        bundle = get_model_bundle(stored_concept)
-        if bundle is None:
-            logger.warning(f"Model bundle for '{stored_concept}' not available – returning placeholder batch response.")
-            # Create placeholder predictions with zeros/defaults
-            placeholder = []
-            for pid in request.patient_ids:
-                placeholder.append({
-                    "patient_id": pid,
-                    "prediction": 0,
-                    "probability": 0.0,
-                    "probabilities": None,
-                    "model_user": stored_concept,
-                    "submodel": "none",
-                })
-            # Record metrics
-            CACHE_SIZE.set(get_cache().size())
-            ML_PREDICTIONS.labels(model_name="none", prediction_type="fallback_batch").inc(len(placeholder))
-            return PredictionResponse(
-                concept=stored_concept,
-                task="classification",
-                count=len(placeholder),
-                predictions=placeholder,
-            )
-
-        # Continue with normal processing
-
-        rows = fetch_prediction_rows(request.patient_ids)
-        if rows.empty:
-            raise HTTPException(status_code=404, detail="No patient data found for the provided IDs.")
-
-        # Submodel selection
-        submodel = request.submodel
-
-        if submodel is None:
-            submodel = max(bundle["models"], key=lambda name: (bundle["models"][name]["metrics"].get(
-                "roc_auc" if bundle["task"] == "classification" else "r2", float("-inf"), ) or float("-inf")
-                )
-            )
-
-        if submodel not in bundle["models"]:
-            raise HTTPException(status_code=400, detail=f"Submodel '{submodel}' is not available for concept '{stored_concept}'."
-                                f" Available submodels: {list(bundle['models'])}")
-
-        # Build features models prediction and pipeline integration
-        features = bundle["features"]
-        prediction_frame = build_prediction_frame(rows, features)
-        model_entry = bundle["models"][submodel]
-        pipeline = model_entry["pipeline"]
-
-        # Split into X and predict
-        X = prediction_frame[features]
-        predictions = pipeline.predict(X)
-
+        raw_predictions = pipeline.predict(X)
         label_encoder = model_entry.get("label_encoder")
+
+        # Inverse transform the predictions if a label encoder is available
         if label_encoder is not None:
-            try:
-                predictions = label_encoder.inverse_transform(predictions)
-            except (TypeError, ValueError):
-                logger.warning("Could not decode predictions for model '%s'.", stored_concept)
-
-        # Probabilities for classification tasks
-        probabilities: list[float | None] = [None] * len(predictions)
-        multi_probabilities: list[list[float] | None] = [None] * len(predictions)
-
-        if hasattr(pipeline, "predict_proba"):
-            proba = pipeline.predict_proba(X)
-
+            raw_predictions = label_encoder.inverse_transform(raw_predictions)
+        probabilities = [None] * len(raw_predictions)
+        multi_probabilities = [None] * len(raw_predictions)
+        
+        if task == "classification" and hasattr(pipeline, "predict_proba"):
+            proba = np.asarray(pipeline.predict_proba(X))
             if proba.ndim == 2 and proba.shape[1] == 2:
-                probabilities = [float(value) for value in proba[:, 1]]
-            elif proba.ndim == 2:
-                multi_probabilities = [[float(value) for value in row] for row in proba]
-
-        output: list[PredictionItem] = []
-
-        for index, prediction in enumerate(predictions):
-            output.append(
-                PredictionItem(
-                    patient_id=str(prediction_frame.iloc[index]["patient_id"]),
-                    prediction=prediction.item() if hasattr(prediction, "item") else prediction,
-                    probability=probabilities[index],
-                    probabilities=multi_probabilities[index],
-                    model_user=stored_concept,
-                    submodel=submodel
-                )
-            )
-
-        # Label metrics and return response
-        ML_PREDICTIONS.labels(model_name=submodel, prediction_type="batch").inc(len(output))
-
-        return PredictionResponse(
-            concept=stored_concept,
-            task=bundle["task"],
-            count=len(output),
-            predictions=output
+                probabilities = [float(v) for v in proba[:, 1]]
+            elif proba.ndim == 2 and proba.shape[1] > 2:
+                multi_probabilities = [[float(v) for v in row] for row in proba]
+    
+    except (ValueError, TypeError, IndexError) as exc:
+        logger.exception("Batch model prediction failed for concept '%s'.", stored_concept)
+        raise HTTPException(status_code=500, detail="Model prediction failed.") from exc
+    
+    output = [
+        PredictionItem(
+            patient_id=str(prediction_frame.iloc[i]["patient_id"]),
+            prediction=(p.item() if hasattr(p, "item") else p),
+            probability=probabilities[i],
+            probabilities=multi_probabilities[i],
+            model_user=stored_concept,
+            submodel=submodel,
         )
-
-    except HTTPException:
-        raise
-
-    except Exception:
-        logger.exception("Error during batch prediction for concept '%s'.", stored_concept)
-        raise HTTPException(status_code=500, detail="Batch prediction failed.")
+        for i, p in enumerate(raw_predictions)
+    ]
+    ML_PREDICTIONS.labels(model_name=submodel, prediction_type="batch").inc(len(output))
+    return PredictionResponse(concept=stored_concept, task=task, count=len(output), predictions=output)
 
 @router.get("/features/{patient_id}")
 def debug_features(patient_id: str):
-    """Debug endpoint — shows exactly what the model sees."""
+    """Return online Feast features for one patient."""
     try:
         return get_online_row(patient_id)
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    except Exception as exc:
+        logger.exception("Failed to load features for patient %s", patient_id)
+        raise HTTPException(status_code=500, detail="Unable to load online features.") from exc
 
 @router.get("/features/schema")
 def feature_schema():

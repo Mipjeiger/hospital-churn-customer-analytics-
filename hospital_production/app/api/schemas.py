@@ -15,16 +15,8 @@ class HospitalDataRequest(BaseModel):
     name: Optional[str] = Field(None, description="Patient's name.")
 
 class PredictionRequest(BaseModel):
-    patient_ids: List[str] = Field(
-        ...,
-        min_length=1,
-        max_length=10_000,
-        description="Patient IDs used for database-backed prediction.",
-    )
-    submodel: Optional[str] = Field(
-        default=None,
-        description="Optional model submodel. The API selects the best model when omitted.",
-    )
+    patient_ids: List[str]
+    submodel: str | None = None
 
 class PredictionItem(BaseModel):
     patient_id: str

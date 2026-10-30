@@ -63,8 +63,7 @@ services:
       - "8001"
     volumes:
       - .:/app
-      - .:/app/feast:/app/app/feast
-      - .:/app/feast/data:/app/app/feast/data
+      - feast_data:/app/app/feast/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -280,6 +279,7 @@ volumes:
   prefect_data:
   prometheus_data:
   grafana_data:
+  feast_data:
 
 networks:
   hospital_network:

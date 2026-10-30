@@ -4,8 +4,9 @@ import { api } from "../lib/api";
 import { LoadingSpinner, UnavailableState } from "../components/ui/States";
 import { fmtFloat } from "../lib/fmt";
 
-const VALID_PAT_RE = /^PAT-\w{8}$/;
+const VALID_PAT_RE = /^PAT-\w{4,}$/;
 
+// ── Single-patient feature lookup ────────────────────────────────────────────
 const FeatureViewer: React.FC = () => {
   const [pid, setPid] = useState("");
   const [pidError, setPidError] = useState<string | null>(null);
@@ -52,11 +53,8 @@ const FeatureViewer: React.FC = () => {
         </button>
       </form>
       {pidError && <p className="field-error">{pidError}</p>}
-
       {isFetching && <LoadingSpinner label="Fetching features from Feast…" />}
-      {error && (
-        <div className="error-inline">⚠️ {(error as Error).message}</div>
-      )}
+      {error && <div className="error-inline">⚠️ {(error as Error).message}</div>}
 
       {data && !isFetching && (
         <div className="table-wrapper" style={{ marginTop: 12 }}>
@@ -72,11 +70,13 @@ const FeatureViewer: React.FC = () => {
                 <tr key={k} className="table-row">
                   <td className="table-cell text-mono">{k}</td>
                   <td className="table-cell">
-                    {v == null
-                      ? <span className="muted">null</span>
-                      : typeof v === "number"
-                      ? fmtFloat(v, 4)
-                      : String(v)}
+                    {v == null ? (
+                      <span className="muted">null</span>
+                    ) : typeof v === "number" ? (
+                      fmtFloat(v, 4)
+                    ) : (
+                      String(v)
+                    )}
                   </td>
                 </tr>
               ))}
@@ -85,7 +85,7 @@ const FeatureViewer: React.FC = () => {
         </div>
       )}
 
-      {schemaData && (
+      {schemaData?.features?.length ? (
         <div style={{ marginTop: 16 }}>
           <h4 className="card-subtitle">Feature Schema ({schemaData.features.length} features)</h4>
           <div className="feature-chips">
@@ -94,11 +94,12 @@ const FeatureViewer: React.FC = () => {
             ))}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 };
 
+// ── Batch prediction + integrity audit ───────────────────────────────────────
 const BatchPredictor: React.FC = () => {
   const [concept, setConcept] = useState("patient_churn");
   const [pidsText, setPidsText] = useState("");
@@ -107,6 +108,13 @@ const BatchPredictor: React.FC = () => {
     mutationFn: () => {
       const ids = pidsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
       return api.predictBatch(concept, ids);
+    },
+  });
+
+  const auditMutation = useMutation({
+    mutationFn: () => {
+      const ids = pidsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+      return api.predictBatch("integrity_audit", ids);
     },
   });
 
@@ -122,6 +130,11 @@ const BatchPredictor: React.FC = () => {
     "service_performance",
     "integrity_audit",
   ];
+
+  const flaggedRows =
+    auditMutation.data?.predictions.filter(
+      (item) => Number(item.prediction) === 1
+    ) ?? [];
 
   return (
     <div className="card">
@@ -152,13 +165,23 @@ const BatchPredictor: React.FC = () => {
             rows={4}
           />
         </div>
-        <button
-          className="btn btn-primary"
-          type="submit"
-          disabled={mutation.isPending || !pidsText.trim()}
-        >
-          {mutation.isPending ? "Predicting…" : "Run Batch Prediction"}
-        </button>
+        <div className="form-row" style={{ gap: 8 }}>
+          <button
+            className="btn btn-primary"
+            type="submit"
+            disabled={mutation.isPending || !pidsText.trim()}
+          >
+            {mutation.isPending ? "Predicting…" : "Run Batch Prediction"}
+          </button>
+          <button
+            className="btn"
+            type="button"
+            disabled={auditMutation.isPending || !pidsText.trim()}
+            onClick={() => auditMutation.mutate()}
+          >
+            {auditMutation.isPending ? "Auditing…" : "Run Integrity Audit"}
+          </button>
+        </div>
       </form>
 
       {mutation.isPending && <LoadingSpinner label="Running batch prediction…" />}
@@ -201,6 +224,38 @@ const BatchPredictor: React.FC = () => {
           </div>
         </div>
       )}
+
+      {auditMutation.data && (
+        <div style={{ marginTop: 16 }}>
+          <p className="text-sm">
+            <strong>Integrity audit:</strong>{" "}
+            {flaggedRows.length} flagged of {auditMutation.data.count} patients.
+          </p>
+          {flaggedRows.length > 0 && (
+            <div className="table-wrapper">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Patient ID</th>
+                    <th>Flag</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {flaggedRows.slice(0, 100).map((p) => (
+                    <tr key={p.patient_id} className="table-row">
+                      <td className="table-cell text-mono">{p.patient_id}</td>
+                      <td className="table-cell">{String(p.prediction)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+      {auditMutation.isError && (
+        <div className="error-inline">⚠️ {(auditMutation.error as Error).message}</div>
+      )}
     </div>
   );
 };
@@ -211,13 +266,10 @@ const DataExplorer: React.FC = () => (
       <h2 className="page-title">Data Explorer</h2>
     </div>
     <p className="page-desc">
-      Feature inspection via Feast online store and interactive batch
-      prediction.
+      Feature inspection via Feast online store and interactive batch prediction.
     </p>
-
     <FeatureViewer />
     <BatchPredictor />
-
     <UnavailableState
       feature="Raw patient data table / CSV export"
       reason="The API does not expose a patient listing endpoint. Raw table access would require a GET /patients endpoint with filtering and pagination backed by PostgreSQL."
@@ -226,4 +278,3 @@ const DataExplorer: React.FC = () => (
 );
 
 export default DataExplorer;
-

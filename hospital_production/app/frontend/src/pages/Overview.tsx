@@ -1,17 +1,8 @@
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  LineChart,
-  Line,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-  Cell,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, Legend,
 } from "recharts";
 import { api } from "../lib/api";
 import { KpiCard, KpiGrid } from "../components/ui/KpiCard";
@@ -29,57 +20,67 @@ const KpiSection: React.FC = () => {
 
   if (isLoading) return <LoadingSpinner label="Loading KPIs…" />;
   if (error)
-    return (
-      <ErrorState
-        message="Could not load KPIs from backend."
-        retry={refetch}
-      />
-    );
+    return <ErrorState message="Could not load KPIs from backend." retry={refetch} />;
   if (!data) return null;
 
   return (
     <KpiGrid>
-      <KpiCard
-        label="Total Patients"
-        value={fmtNum(data.total_patients)}
-        sub="in database"
-        accent="#0F2A44"
-      />
-      <KpiCard
-        label="Avg Satisfaction"
-        value={fmtFloat(data.average_satisfaction, 1)}
-        sub="/ 100"
-        accent="#0E7C7B"
-      />
-      <KpiCard
-        label="Churn Rate"
-        value={fmtPct(data.churn_rate)}
-        sub="historical"
-        accent="#D64545"
-      />
-      <KpiCard
-        label="Admission Rate"
-        value={fmtPct(data.admission_rate)}
-        sub="admitted / requested"
-        accent="#2A9D8F"
-      />
-      <KpiCard
-        label="Staff Attendance"
-        value={fmtPct(data.staff_attendance_rate)}
-        sub="present / total"
-        accent="#E6A817"
-      />
+      <KpiCard label="Total Patients" value={fmtNum(data.total_patients)} sub="in database" accent="#0F2A44" />
+      <KpiCard label="Avg Satisfaction" value={fmtFloat(data.average_satisfaction, 1)} sub="/ 100" accent="#0E7C7B" />
+      <KpiCard label="Churn Rate" value={fmtPct(data.churn_rate)} sub="historical" accent="#D64545" />
+      <KpiCard label="Admission Rate" value={fmtPct(data.admission_rate)} sub="admitted / requested" accent="#2A9D8F" />
+      <KpiCard label="Staff Attendance" value={fmtPct(data.staff_attendance_rate)} sub="present / total" accent="#E6A817" />
     </KpiGrid>
   );
 };
 
-// ── Model health row (each is its own component — safe for hooks) ─────────────
+// ── Prediction overview (backend-computed aggregate KPIs) ────────────────────
+const PredictionOverview: React.FC = () => {
+  const { data: overview, isLoading, error, refetch } = useQuery({
+    queryKey: ["prediction-overview"],
+    queryFn: () => api.predictionOverview(),
+    staleTime: 60_000,
+  });
+
+  if (isLoading) return <LoadingSpinner label="Loading prediction KPIs…" />;
+  if (error)
+    return <ErrorState message="Could not load prediction overview." retry={refetch} />;
+  if (!overview) return null;
+
+  const predictionCards = [
+    {
+      label: "Predicted Churn Rate",
+      value: fmtPct(overview.predicted_churn_rate),
+      sub: "model-derived",
+      accent: "#D64545",
+    },
+    {
+      label: "High-Risk Patients",
+      value: fmtNum(overview.high_risk_count),
+      sub: "predicted",
+      accent: "#E6A817",
+    },
+    {
+      label: "Avg Predicted Health",
+      value: fmtFloat(overview.average_health_score, 2),
+      sub: "/ 100",
+      accent: "#0E7C7B",
+    },
+  ];
+
+  return (
+    <KpiGrid>
+      {predictionCards.map((c) => (
+        <KpiCard key={c.label} {...c} />
+      ))}
+    </KpiGrid>
+  );
+};
+
+// ── Model health row (one component per concept — hooks in loops are illegal) ─
 const MODEL_NAMES = [
-  "patient_churn",
-  "risk_level",
-  "risk_score",
-  "service_performance",
-  "integrity_audit",
+  "patient_churn", "risk_level", "risk_score",
+  "service_performance", "integrity_audit",
 ];
 
 interface ModelHealthRowData {
@@ -88,22 +89,25 @@ interface ModelHealthRowData {
   status: string;
 }
 
-const ModelHealthRow: React.FC<{ name: string; onData: (d: ModelHealthRowData) => void }> = ({ name, onData }) => {
-  const { data, isLoading } = useQuery({
-    queryKey: ["model-health", name],
-    queryFn: () => api.modelHealth(name),
-    staleTime: 60_000,
-  });
-  React.useEffect(() => {
-    onData({
-      name,
-      loaded: data?.loaded ? 1 : 0,
-      status: isLoading ? "loading" : data?.loaded ? "ok" : "offline",
+const ModelHealthRow: React.FC<{ name: string; onData: (d: ModelHealthRowData) => void }> =
+  ({ name, onData }) => {
+    const { data, isLoading } = useQuery({
+      queryKey: ["model-health", name],
+      queryFn: () => api.modelHealth(name),
+      staleTime: 60_000,
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, isLoading]);
-  return null;
-};
+
+    React.useEffect(() => {
+      onData({
+        name,
+        loaded: data?.loaded ? 1 : 0,
+        status: isLoading ? "loading" : data?.loaded ? "ok" : "offline",
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [data, isLoading]);
+
+    return null;
+  };
 
 const ModelHealthBars: React.FC = () => {
   const [rows, setRows] = React.useState<ModelHealthRowData[]>(
@@ -150,7 +154,7 @@ const ModelHealthBars: React.FC = () => {
   );
 };
 
-// ── System health ──────────────────────────────────────────────────────────────
+// ── System health badge ──────────────────────────────────────────────────────
 const SystemHealthBadge: React.FC = () => {
   const { data, isLoading } = useQuery({
     queryKey: ["health"],
@@ -194,6 +198,7 @@ const Overview: React.FC = () => (
     </p>
 
     <KpiSection />
+    <PredictionOverview />
 
     <div className="charts-row">
       <div className="chart-card chart-card--wide">
@@ -207,7 +212,7 @@ const Overview: React.FC = () => (
           <LineChart data={INSIGHT_DATA}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="month" />
-            <YAxis yAxisId="left" domain={[0, 100]} tickFormatter={(v) => `${v}`} />
+            <YAxis yAxisId="left" domain={[0, 100]} />
             <Tooltip />
             <Legend />
             <Line yAxisId="left" dataKey="churn" stroke={PALETTE[4]} name="Churn %" dot={false} strokeWidth={2} />
@@ -216,14 +221,13 @@ const Overview: React.FC = () => (
           </LineChart>
         </ResponsiveContainer>
       </div>
-
       <ModelHealthBars />
     </div>
 
     <div className="insight-box">
-      <strong>📌 Data Note:</strong> KPIs are computed from the full PostgreSQL hospital table
-      via <code>/business-kpi</code>. The trend chart uses illustrative shape data. For
-      date-filtered analytics, add a <code>/analytics/summary</code> endpoint.
+      <strong>📌 Data Note:</strong> KPIs come from <code>/business-kpi</code>;
+      predicted KPIs come from <code>/predict/overview</code>.
+      The trend chart uses illustrative shape data.
     </div>
   </div>
 );

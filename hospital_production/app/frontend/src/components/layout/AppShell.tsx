@@ -25,7 +25,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { path: "/", label: "Overview", icon: <Activity size={18} /> },
   { path: "/patients", label: "Patient Analytics", icon: <Users size={18} /> },
-  { path: "/patient-management", label: "Patient Mgmt", icon: <ClipboardList size={18} /> },
+  { path: "/patient-management", label: "Patient Management", icon: <ClipboardList size={18} /> },
   { path: "/operations", label: "Hospital Operations", icon: <Hospital size={18} /> },
   { path: "/staff", label: "Staff Analytics", icon: <UserCheck size={18} /> },
   { path: "/models", label: "ML Models", icon: <Brain size={18} /> },
@@ -46,8 +46,8 @@ export const Sidebar: React.FC<{
       <div className="sidebar-header">
         {!collapsed && (
           <span className="sidebar-logo">
-            <Hospital size={20} />
-            <span>HospitalOS</span>
+            <Hospital size={18} />
+            <span>Health Care</span>
           </span>
         )}
         <button className="sidebar-toggle" onClick={onToggle} aria-label="Toggle sidebar">

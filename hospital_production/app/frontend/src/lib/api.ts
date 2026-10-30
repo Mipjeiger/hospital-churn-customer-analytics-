@@ -1,28 +1,13 @@
 /**
  * Centralized typed API client for the Hospital Operations FastAPI backend.
- * All requests go through /api which Vite proxies to VITE_API_BASE_URL (default: http://localhost:8000).
+ * All requests go through /api, which:
+ *   - in dev  → Vite proxies /api/* to http://fastapi:8000/*
+ *   - in prod → nginx proxies /api/* to http://fastapi:8000/*
  */
 
-/**
- * Resolves the backend base URL for browser requests.
- * - If VITE_API_BASE_URL is explicitly set to a valid URL, use it.
- * - If VITE_API_BASE_URL is omitted or set to the Docker-internal hostname 'http://fastapi:8000'
- *   (which the host browser cannot resolve via DNS), automatically resolve to 'http://localhost:8000'
- *   where the FastAPI container's port 8000 is mapped.
- */
-function resolveApiBase(): string {
-  const envUrl = (import.meta as any).env?.VITE_API_BASE_URL as string | undefined;
-  if (!envUrl) {
-    return "http://localhost:8000";
-  }
-  const trimmed = envUrl.trim().replace(/\/+$/, "");
-  if (typeof window !== "undefined" && trimmed.includes("fastapi:")) {
-    return "http://localhost:8000";
-  }
-  return trimmed;
-}
-
-const BASE = resolveApiBase();
+const BASE =
+  ((import.meta as any).env?.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, "") ||
+  "/api";
 
 async function request<T>(
   path: string,
@@ -32,6 +17,7 @@ async function request<T>(
     headers: { "Content-Type": "application/json", ...(options.headers ?? {}) },
     ...options,
   });
+
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -42,7 +28,10 @@ async function request<T>(
     }
     throw new ApiError(res.status, detail);
   }
-  return res.json() as Promise<T>;
+
+  // Some endpoints (e.g. a 204) return no body. Guard against JSON.parse("").
+  const text = await res.text();
+  return (text ? JSON.parse(text) : null) as T;
 }
 
 export class ApiError extends Error {
@@ -147,6 +136,88 @@ export interface PromptResponse {
   template: string;
 }
 
+export interface BatchPredictionRequest {
+  patient_ids: string[];
+}
+
+export interface ChurnBatchResult {
+  patient_id: string;
+  churn_probability: number;
+  churn_prediction: number;
+  submodel: string;
+}
+
+export interface ChurnBatchResponse {
+  model: string;
+  count: number;
+  results: ChurnBatchResult[];
+}
+
+export interface RiskBatchResult {
+  patient_id: string;
+  risk_score: number;
+  risk_level: string;
+  risk_score_submodel: string;
+  risk_level_submodel: string;
+}
+
+export interface RiskBatchResponse {
+  count: number;
+  results: RiskBatchResult[];
+}
+
+export interface ServicePerformanceResult {
+  patient_id: string;
+  health_score: number;
+}
+
+export interface ServicePerformanceResponse {
+  model: string;
+  count: number;
+  results: ServicePerformanceResult[];
+}
+
+export interface StaffMoraleResult {
+  patient_id: string;
+  morale: number;
+}
+
+export interface StaffMoraleResponse {
+  model: string;
+  count: number;
+  results: StaffMoraleResult[];
+}
+
+export interface StaffAttendanceResult {
+  patient_id: string;
+  attendance: number;
+}
+
+export interface StaffAttendanceResponse {
+  model: string;
+  count: number;
+  results: StaffAttendanceResult[];
+}
+
+export interface IntegrityResult {
+  patient_id: string;
+  audit_flag: number;
+  audit_probability: number;
+}
+
+export interface IntegrityResponse {
+  model: string;
+  count: number;
+  results: IntegrityResult[];
+}
+
+export interface OverviewPredictionResponse {
+  predicted_churn_rate: number;
+  high_risk_count: number;
+  sample_size: number;
+  average_health_score: number;
+}
+
 // ─── API Service ──────────────────────────────────────────────────────────────
 
 export const api = {
@@ -176,13 +247,17 @@ export const api = {
     patient_ids: string[],
     submodel?: string
   ) =>
-    request<PredictionResponse>(`/predict/${encodeURIComponent(concept)}/batch`, {
-      method: "POST",
-      body: JSON.stringify({ patient_ids, submodel }),
-    }),
+    request<PredictionResponse>(
+      `/predict/${encodeURIComponent(concept)}/batch`,
+      {
+        method: "POST",
+        body: JSON.stringify({ patient_ids, submodel }),
+      }
+    ),
 
   /** GET /predict/features/schema */
-  featureSchema: () => request<FeatureSchemaResponse>("/predict/features/schema"),
+  featureSchema: () =>
+    request<FeatureSchemaResponse>("/predict/features/schema"),
 
   /** GET /predict/features/{patient_id} */
   patientFeatures: (patient_id: string) =>
@@ -207,7 +282,51 @@ export const api = {
   /** GET /prompt/{name} */
   prompt: (name: string, version?: number) => {
     const qs = version != null ? `?version=${version}` : "";
-    return request<PromptResponse>(`/prompt/${encodeURIComponent(name)}${qs}`);
+    return request<PromptResponse>(
+      `/prompt/${encodeURIComponent(name)}${qs}`
+    );
   },
-};
 
+  // ─── Optional dedicated batch endpoints ───────────────────────────────────
+  // These will 404 until you add the matching FastAPI routes. They're kept
+  // so callers can be written against a stable shape. Remove them if unused.
+
+  predictBatchChurn: (patient_ids: string[]) =>
+    request<ChurnBatchResponse>("/predict/batch/churn", {
+      method: "POST",
+      body: JSON.stringify({ patient_ids }),
+    }),
+
+  predictBatchRisk: (patient_ids: string[]) =>
+    request<RiskBatchResponse>("/predict/batch/risk", {
+      method: "POST",
+      body: JSON.stringify({ patient_ids }),
+    }),
+
+  predictServicePerformance: (patient_ids: string[]) =>
+    request<ServicePerformanceResponse>("/predict/batch/service-performance", {
+      method: "POST",
+      body: JSON.stringify({ patient_ids }),
+    }),
+
+  predictStaffMorale: (patient_ids: string[]) =>
+    request<StaffMoraleResponse>("/predict/batch/staff-morale", {
+      method: "POST",
+      body: JSON.stringify({ patient_ids }),
+    }),
+
+  predictStaffAttendance: (patient_ids: string[]) =>
+    request<StaffAttendanceResponse>("/predict/batch/staff-attendance", {
+      method: "POST",
+      body: JSON.stringify({ patient_ids }),
+    }),
+
+  predictIntegrityAudit: (patient_ids: string[]) =>
+    request<IntegrityResponse>("/predict/batch/integrity-audit", {
+      method: "POST",
+      body: JSON.stringify({ patient_ids }),
+    }),
+
+  predictionOverview: () =>
+    request<OverviewPredictionResponse>("/predict/overview"),
+};

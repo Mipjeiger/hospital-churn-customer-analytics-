@@ -118,6 +118,7 @@ def predict_churn(request: ChurnRequest):
         except Exception as e:
             logger.error(f"Feature lookup failed for patient_id: {request.patient_id} | Error: {e}")
             raise HTTPException(status_code=500, detail=f"Feast look up failed: {str(e)}")
+        
         if not feat_dict or all(v is None for v in feat_dict.values()):
             raise HTTPException(status_code=404, detail=f"No features found for patient_id: {request.patient_id}")
     
@@ -127,17 +128,36 @@ def predict_churn(request: ChurnRequest):
         logger.error("Model bundle for 'churn' not found in MinIO.")
         raise HTTPException(status_code=500, detail="Model bundle not available.")
 
-    # Ensure required entries are present
-    required_keys = {"features", "pipeline", "best_submodel"}
-    missing_keys = required_keys - bundle.keys()
+    # ==============================================================
+    # Determine model source – single pipeline or multi‑model bundle
+    # ==============================================================
     
-    if missing_keys:
-        logger.error(f"Model bundle missing required keys: {missing_keys}")
-        raise HTTPException(status_code=500, detail=f"Model bundle incomplete: missing {missing_keys}")
+    # Getting Simple bundle with a single pipeline
+    if "pipeline" in bundle and "best_submodel" in bundle:
+        pipeline = bundle["pipeline"]
+        best_submodel = bundle["best_submodel"]
+        features = bundle["features"]
+
+    # Multi‑model bundle – pick the best submodel (fallback to first)    
+    elif "models" in bundle:
+        models = bundle["models"]
+        features = bundle.get("features")
+        if not features:
+            logger.error("Model bundle missing 'features' entry.")
+            raise HTTPException(status_code=500, detail="Model bundle incomplete: missing features.")
+        
+        # Choose submodel with highest ROC AUC (or any if metric missing)
+        best_submodel = max(models, key=lambda n: models[n].get("metrics", {}).get("roc_auc", float("-inf")))
+        pipeline = models[best_submodel].get("pipeline")
+        if pipeline is None:
+            logger.error(f"Pipeline missing for selected submodel '{best_submodel}'.")
+            raise HTTPException(status_code=500, detail="Model pipeline not available.")
+    else:
+        logger.error("Model bundle missing both 'pipeline' and 'models' entries.")
+        raise HTTPException(status_code=500, detail="Model bundle incomplete.")
 
     # Build input DataFrame using declared features
-    X = pd.DataFrame([feat_dict])[bundle["features"]]
-    pipeline = bundle["pipeline"]
+    X = pd.DataFrame([feat_dict])[features]
     
     try:
         prediction = pipeline.predict(X)
@@ -166,14 +186,19 @@ def predict_churn(request: ChurnRequest):
         logger.exception("Failed to calculate churn probability for patient_id: %s | Error: %s", request.patient_id, e)
         raise HTTPException(status_code=500, detail="Model prediction failed due to unexpected output format.") from e
     
-    result = {"patient_id": request.patient_id, "churn_probability": round(prob, 4), "churn_prediction": pred, "best_submodel": bundle["best_submodel"]}
+    result = {
+        "patient_id": request.patient_id,
+        "churn_probability": round(prob, 4),
+        "churn_prediction": pred,
+        "best_submodel": best_submodel,
+    }
     
     # Metrics and caching
     cache.set(key, result)
     CACHE_SIZE.set(cache.size())
-    ML_PREDICTIONS.labels(model_name=bundle["best_submodel"], prediction_type="fresh").inc()
+    ML_PREDICTIONS.labels(model_name=best_submodel, prediction_type="fresh").inc()
     RISK_SCORE.labels(patient_id=request.patient_id, service=str(feat_dict.get("service", "unknown"))).set(prob)
-    MODEL_LOADED.labels(model_name=bundle["best_submodel"]).set(1)
+    MODEL_LOADED.labels(model_name=best_submodel).set(1)
     return ChurnResponse(**result, cached=False)
 
 # ==== Batch Prediction Endpoint =====

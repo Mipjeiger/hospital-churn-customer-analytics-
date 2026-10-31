@@ -76,8 +76,8 @@ const BatchPredictor: React.FC = () => {
   const mutation = useMutation({
     mutationFn: async (patientIds: string[]) => {
       const [churn, risk] = await Promise.all([
-        api.predictBatch("patient_churn", patientIds),
-        api.predictBatch("risk_level", patientIds),
+        api.predictBatchChurn(patientIds),
+        api.predictBatchRisk(patientIds),
       ]);
 
       return churn.predictions.map((item) => {
@@ -85,7 +85,7 @@ const BatchPredictor: React.FC = () => {
         return {
           patient_id: item.patient_id,
           prediction: item.prediction,
-          probability: item.probability,
+          probability: item.probability ?? null, // Ensure probability is either a number or null
           submodel: item.submodel,
           risk_score: null as number | null,
           risk_level: String(riskItem?.prediction ?? "Unknown"),

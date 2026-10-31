@@ -114,7 +114,7 @@ const BatchPredictor: React.FC = () => {
   const auditMutation = useMutation({
     mutationFn: () => {
       const ids = pidsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
-      return api.predictBatch("integrity_audit", ids);
+      return api.predictIntegrityAudit(ids);
     },
   });
 

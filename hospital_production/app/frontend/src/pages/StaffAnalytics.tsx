@@ -30,8 +30,8 @@ const StaffPredictions: React.FC = () => {
     queryKey: ["staff-predictions", SAMPLE_IDS],
     queryFn: async () => {
       const [morale, attendance] = await Promise.all([
-        api.predictBatch("staff_staff_morale", SAMPLE_IDS),
-        api.predictBatch("staff_staff_attendance_rate", SAMPLE_IDS),
+        api.predictStaffMorale(SAMPLE_IDS),
+        api.predictStaffAttendance(SAMPLE_IDS),
       ]);
       return { morale, attendance };
     },

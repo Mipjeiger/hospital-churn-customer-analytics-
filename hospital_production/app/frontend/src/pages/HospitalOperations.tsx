@@ -15,7 +15,7 @@ const SAMPLE_IDS = ["PAT-12345678"]; // replace with real IDs from your data
 const RiskOverview: React.FC = () => {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["risk-overview", SAMPLE_IDS],
-    queryFn: () => api.predictBatch("risk_level", SAMPLE_IDS),
+    queryFn: () => api.predictBatchRisk(SAMPLE_IDS),
     staleTime: 60_000,
   });
 

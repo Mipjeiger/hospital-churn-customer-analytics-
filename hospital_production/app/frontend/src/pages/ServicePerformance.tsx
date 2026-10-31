@@ -18,7 +18,7 @@ const SAMPLE_IDS = ["PAT-12345678"]; // replace with real IDs from your data
 const ServicePredictionChart: React.FC = () => {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["service-prediction", SAMPLE_IDS],
-    queryFn: () => api.predictBatch("service_performance", SAMPLE_IDS),
+    queryFn: () => api.predictServicePerformance(SAMPLE_IDS),
     staleTime: 60_000,
   });
 

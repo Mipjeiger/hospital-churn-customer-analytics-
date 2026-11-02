@@ -14,6 +14,9 @@ class HospitalDataRequest(BaseModel):
     service: Literal["emergency", "surgery", "general_medicine", "ICU"]
     name: Optional[str] = Field(None, description="Patient's name.")
 
+class BatchPredictRequest(BaseModel):
+    patient_ids: list[str]
+
 class PredictionRequest(BaseModel):
     patient_ids: List[str]
     submodel: str | None = None

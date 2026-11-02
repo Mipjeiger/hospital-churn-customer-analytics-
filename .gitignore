@@ -14,3 +14,5 @@ hospital_production/app/frontend/node_modules
 hospital_production/app/frontend/hospital_production/app/frontend/node_modules
 hospital_production/docker/nginx.conf
 hospital_production/app/frontend/src/vite-env.d.ts
+develop/minio_models
+.venv

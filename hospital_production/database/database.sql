@@ -26,6 +26,16 @@ CREATE TABLE hospital.hospital_data (
     patient_churn        SMALLINT     NOT NULL CHECK (patient_churn IN (0, 1))
 );
 
+-- Add new columns to the hospital_data table
+ALTER TABLE hospital.hospital_data
+ADD COLUMN IF NOT EXISTS capacity_pressure DOUBLE PRECISION,
+ADD COLUMN IF NOT EXISTS admission_rate_row DOUBLE PRECISION,
+ADD COLUMN IF NOT EXISTS refusal_rate_row DOUBLE PRECISION,
+ADD COLUMN IF NOT EXISTS staff_attendance_rate DOUBLE PRECISION;
+
+ALTER TABLE hospital.hospital_data
+ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION;
+
 SELECT * FROM hospital.hospital_data;
 
 SELECT SCHEMA_NAME

@@ -8,6 +8,7 @@ from api.routes import llm, predict
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
 from contextlib import asynccontextmanager
+from minio.error import S3Error
 from app.ml.feast_store import get_store
 from app.api.dependencies import get_model_bundle
 from app.api.metrics import REQUEST_COUNT, REQUEST_LATENCY, MODEL_LOADED, BUSINESS_KPI, CACHE_SIZE
@@ -16,7 +17,7 @@ from app.ml.pg_store import query
 from app.ml.registry import load_concept
 from app.ml.multimodel import pick_best
 from app.ml.minio_store import _client
-from minio.error import S3Error
+from app.api.routes import database
 
 # Define logging
 logging.basicConfig(level=logging.INFO)
@@ -118,6 +119,7 @@ async def metrics_middleware(request: Request, call_next):
 
 # Include API routers
 app.include_router(llm.router)
+app.include_router(database.router)
 app.include_router(predict.router)
 
 # Endpoint helper

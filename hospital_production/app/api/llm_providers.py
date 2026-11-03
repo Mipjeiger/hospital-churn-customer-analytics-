@@ -42,21 +42,23 @@ class LLMClient:
 
         self.hf_api_key = settings.HUGGINGFACE_API_KEY
         self.groq_api_key = settings.GROQ_API_KEY
-        self.ninerouter_base_url = settings.NINEROUTER_BASE_URL
         self.ninerouter_api_key = settings.NINEROUTER_API_KEY
 
         # Definition LLM APi clients
-        self.hf_client = (
-            InferenceClient(
+        self.hf_client = InferenceClient(
                 token=self.hf_api_key,
-                base_url="https://router.huggingface.co",
-            )
-            if self.hf_api_key else None
-        )
+                base_url="https://router.huggingface.co/v1",
+            ) if self.hf_api_key else None
         
-        self.groq_client = Groq(api_key=self.groq_api_key) if self.groq_api_key else None
-        self.ninerouter_client = OpenAI(api_key=self.ninerouter_api_key,
-                                        base_url=self.ninerouter_base_url) if self.ninerouter_api_key else None
+        self.groq_client = OpenAI(
+                api_key=self.groq_api_key,
+                base_url=settings.GROQ_BASE_URL,
+            ) if self.groq_api_key else None
+        
+        self.ninerouter_client = OpenAI(
+            api_key=self.ninerouter_api_key,
+            base_url=settings.NINEROUTER_BASE_URL,
+        ) if self.ninerouter_api_key else None
 
         # Load config json
         self.role_config = settings.ROLE_CONFIG if settings.ROLE_CONFIG.exists() else None
@@ -131,7 +133,7 @@ class LLMClient:
         # Try HuggingFace Inference API
         if self.hf_client is not None:
             try:
-                response = self.hf_client.chat_completion(
+                response = self.hf_client.chat.completions.create(
                     model="Qwen/Qwen2.5-Coder-32B-Instruct",
                     messages=messages,
                     max_tokens=max_tokens,
@@ -154,7 +156,7 @@ class LLMClient:
         # Second fallback to Groq Inference API
         if self.groq_client is not None:
             try:
-                response = self.groq_client.chat.completions.create(
+                response = self.groq_client.create(
                     model="openai/gpt-oss-20b",
                     messages=messages,
                     max_tokens=max_tokens,
@@ -175,7 +177,7 @@ class LLMClient:
 
         if self.ninerouter_client is not None:
             try:
-                response = self.ninerouter_client.chat.completions.create(
+                response = self.ninerouter_client.create(
                     model="sragent",
                     messages=messages,
                     max_tokens=max_tokens,
@@ -223,6 +225,45 @@ class LLMClient:
             "llm_response": llm_response,
             "provider": llm_response.get("provider", "Unknown")
         }
+
+    # --- Check LLM Providers Status ---
+    def check_providers_status(self) -> dict[str, str]:
+        """Check the status of LLM providers and return their availability."""
+        from huggingface_hub import HfApi
+        status: dict[str, str] = {}
+
+        # Check HuggingFace
+        if self.hf_api_key and self.hf_client is not None:
+            try:
+                HfApi(token=self.hf_api_key).whoami()
+                status["HuggingFace"] = "available"
+            except Exception as e:
+                status["HuggingFace"] = f"unavailable: {e}"
+
+        else:
+            status["HuggingFace"] = "Huggingface Not configured."
+
+        # Check Groq
+        if self.groq_api_key and self.groq_client is not None:
+            try:
+                self.groq_client.models.list()
+                status["Groq"] = "available"
+            except Exception as e:
+                status["Groq"] = f"unavailable: {e}"
+        else:
+            status["Groq"] = "Groq Not configured."
+
+        # Check NineRouter
+        if self.ninerouter_api_key and self.ninerouter_client is not None:
+            try:
+                self.ninerouter_client.models.list()
+                status["NineRouter"] = "available"
+            except Exception as e:
+                status["NineRouter"] = f"unavailable: {e}"
+        else:
+            status["NineRouter"] = "NineRouter Not configured."
+
+        return status
 
 # Usage LLM
 llm_client = LLMClient()

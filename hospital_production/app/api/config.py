@@ -27,9 +27,10 @@ class Settings():
     # LLM API Keys
     HUGGINGFACE_API_KEY: str = os.getenv("HUGGINGFACE_API_KEY")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY")
-    NINEROUTER_BASE_URL: str = os.getenv("NINEROUTER_BASE_URL")
+    GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+    NINEROUTER_BASE_URL: str = os.getenv("NINEROUTER_BASE_URL", "https://9router.com/api/v1")
     NINEROUTER_API_KEY: str = os.getenv("NINEROUTER_API_KEY")
-    NINEROUTER_MODEL_NAME: str = "sragent"
+    NINEROUTER_MODEL_NAME: str = os.getenv("NINEROUTER_MODEL_NAME", "sragent")
 
     # ML Path dependencies
     BASE_PATH: Path = Path(__file__).parents[2] # hospital_production

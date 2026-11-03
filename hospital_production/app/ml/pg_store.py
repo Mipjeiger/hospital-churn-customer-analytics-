@@ -2,6 +2,7 @@ import logging
 from functools import lru_cache
 from sqlalchemy import create_engine, text
 import pandas as pd
+from typing import Any
 from app.api.config import settings
 
 logger = logging.getLogger(__name__)
@@ -16,9 +17,14 @@ def load_data() -> pd.DataFrame:
     """Load data from PostgreSQL into a Pandas DataFrame."""
     return pd.read_sql(f"SELECT * FROM {settings.POSTGRES_TABLE}", _engine())
 
-def query(sql: str) -> pd.DataFrame:
+def query(sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
     """Execute a SQL query and return the result as a Pandas DataFrame."""
-    return pd.read_sql(sql, _engine())
+    with _engine().connect() as conn:
+        return pd.read_sql_query(
+            text(sql),
+            conn,
+            params=params
+        )
 
 def fetch_patient(patient_id: str) -> pd.Series | None:
     """Fetch a single patient row by ID"""

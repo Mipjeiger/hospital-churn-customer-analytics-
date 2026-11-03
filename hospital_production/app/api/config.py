@@ -28,7 +28,7 @@ class Settings():
     HUGGINGFACE_API_KEY: str = os.getenv("HUGGINGFACE_API_KEY")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY")
     GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-    NINEROUTER_BASE_URL: str = os.getenv("NINEROUTER_BASE_URL", "https://9router.com/api/v1")
+    NINEROUTER_BASE_URL: str = os.getenv("NINEROUTER_BASE_URL", "http://host.docker.internal:20128/v1")
     NINEROUTER_API_KEY: str = os.getenv("NINEROUTER_API_KEY")
     NINEROUTER_MODEL_NAME: str = os.getenv("NINEROUTER_MODEL_NAME", "sragent")
 
